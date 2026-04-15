@@ -1,0 +1,54 @@
+runtime:
+  task_id: ""
+  trace_path: script_runtime/artifacts/robotwin_place_mouse_pad_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_place_mouse_pad
+
+robotwin:
+  task_name: place_mouse_pad
+  task_config: demo_clean
+  seed: 0
+  episode_index: 0
+  render_freq: 0
+  use_seed: true
+  collect_data: false
+  save_data: false
+  eval_mode: true
+  object_attr: mouse
+  target_attr: target
+  target_pose_attr: target_pose
+  target_functional_point_id: 0
+  object_functional_point_id: null
+  pregrasp_distance: 0.1
+  place_approach_distance: 0.07
+  place_release_distance: 0.005
+  retreat_distance: 0.08
+  place_constrain: align
+  camera_shader_dir: default
+  capture_video: true
+  capture_every_n_steps: 4
+  episode_name: place_mouse_pad
+
+execution:
+  active_source: policy
+  control_owner: script_runtime
+
+task_goal:
+  task_name: place_mouse_pad
+  target_object: mouse
+  target_surface: pad
+
+scene:
+  workspace_ready: true
+  tracking_lost: false
+  depth_anomaly: false
+  detection_confidence: 1.0
+  calibration_version: robotwin
+
+poses:
+  home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+gripper:
+  open_width: 1.0
+  close_width: 0.0
+  tau: 1.0

@@ -53,7 +53,7 @@ class PickPlaceTask(ScriptTask):
                 RetryNode(
                     "grasp_retry_budget",
                     RecoveryNode("grasp_recovery", grasp_attempt, build_grasp_recovery),
-                    max_attempts=3,
+                    max_attempts=5,
                 ),
                 SkillNode("place_approach", "PlaceApproach"),
                 SkillNode("place_release", "PlaceRelease"),

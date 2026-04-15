@@ -211,10 +211,18 @@ class Base_Task(gym.Env):
         # give renderer to sapien sim
         self.engine.set_renderer(self.renderer)
 
-        sapien.render.set_camera_shader_dir("rt")
-        sapien.render.set_ray_tracing_samples_per_pixel(32)
-        sapien.render.set_ray_tracing_path_depth(8)
-        sapien.render.set_ray_tracing_denoiser("oidn")
+        camera_shader_dir = os.environ.get("SCRIPT_POLICY_SAPIEN_CAMERA_SHADER_DIR", "rt")
+        sapien.render.set_camera_shader_dir(camera_shader_dir)
+        if camera_shader_dir == "rt":
+            sapien.render.set_ray_tracing_samples_per_pixel(
+                int(os.environ.get("SCRIPT_POLICY_SAPIEN_RT_SPP", "32"))
+            )
+            sapien.render.set_ray_tracing_path_depth(
+                int(os.environ.get("SCRIPT_POLICY_SAPIEN_RT_DEPTH", "8"))
+            )
+            sapien.render.set_ray_tracing_denoiser(
+                os.environ.get("SCRIPT_POLICY_SAPIEN_RT_DENOISER", "oidn")
+            )
 
         # declare sapien scene
         scene_config = sapien.SceneConfig()

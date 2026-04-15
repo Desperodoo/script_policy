@@ -8,7 +8,11 @@ from script_runtime.session import build_pick_place_session
 def test_build_pick_place_session_runs_with_mock(tmp_path: Path):
     trace_path = tmp_path / "trace.jsonl"
     config = {
-        "runtime": {"task_id": "pick-place-session-test", "trace_path": str(trace_path)},
+        "runtime": {
+            "task_id": "pick-place-session-test",
+            "trace_path": str(trace_path),
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
         "execution": {"active_source": "policy", "control_owner": "script_runtime"},
         "task_goal": {"task_name": "pick_place"},
         "scene": {
@@ -34,6 +38,9 @@ def test_build_pick_place_session_runs_with_mock(tmp_path: Path):
     result = session.run()
 
     assert result.status == SkillStatus.SUCCESS
-    assert trace_path.exists()
+    assert session.trace_path is not None
+    assert session.trace_path.exists()
+    assert session.trace_path.parent.name == "pick-place-session-test"
+    assert session.runtime_artifacts["run_dir"].endswith("pick-place-session-test")
     assert session.blackboard.world_state.robot.eef_pose == [0.25, 0.22, 0.28, 0.0, 0.0, 0.0, 1.0]
     assert session.blackboard.world_state.scene.grasped is False

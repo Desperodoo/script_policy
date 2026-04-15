@@ -39,6 +39,12 @@ class MoveJ(Skill):
         sdk = context.adapters["sdk"]
         result = sdk.move_j(target, speed=self.speed)
         if not result.get("ok", False):
+            if self.name == "GoHome" and not context.world_state.scene.grasped:
+                return SkillResult.success(
+                    cleanup_best_effort=True,
+                    reason="go_home_failed_after_release",
+                    sdk_result=result,
+                )
             return SkillResult.failure(FailureCode.SDK_ERROR, message="move_j failed", sdk_result=result)
         if hasattr(sdk, "refresh_world"):
             sdk.refresh_world(context.blackboard)
@@ -77,6 +83,16 @@ class MoveL(Skill):
 
     def recover(self, context: SkillContext):
         return RecoveryAction(name="SafeRetreat")
+
+
+def _offset_pose(pose: Optional[List[float]], dz: float = 0.0, dx: float = 0.0, dy: float = 0.0) -> Optional[List[float]]:
+    if pose is None or len(pose) < 7:
+        return None
+    shifted = list(pose)
+    shifted[0] += float(dx)
+    shifted[1] += float(dy)
+    shifted[2] += float(dz)
+    return shifted
 
 
 class ServoDelta(Skill):
@@ -140,6 +156,54 @@ class Retreat(MoveL):
             blackboard_key="retreat_pose",
         )
 
+    def run(self, context: SkillContext) -> SkillResult:
+        target = self.target_pose or context.blackboard.get(self.blackboard_key)
+        sdk = context.adapters["sdk"]
+
+        if target:
+            result = sdk.move_l(target, speed=self.speed)
+            if result.get("ok", False):
+                if hasattr(sdk, "refresh_world"):
+                    sdk.refresh_world(context.blackboard)
+                return SkillResult.success(command=result["command"])
+
+        home_joints = context.blackboard.get("home_joints")
+        if home_joints:
+            fallback = sdk.move_j(home_joints, speed=min(self.speed, 0.5))
+            if fallback.get("ok", False):
+                if hasattr(sdk, "refresh_world"):
+                    sdk.refresh_world(context.blackboard)
+                return SkillResult.success(
+                    command=fallback["command"],
+                    fallback_used="move_j_home",
+                    original_target=target,
+                )
+            if not context.world_state.scene.grasped:
+                return SkillResult.success(
+                    cleanup_best_effort=True,
+                    reason="retreat_failed_after_release",
+                    sdk_result=fallback,
+                    original_target=target,
+                )
+            return SkillResult.failure(
+                FailureCode.SDK_ERROR,
+                message="retreat fallback move_j failed",
+                sdk_result=fallback,
+                original_target=target,
+            )
+
+        if not context.world_state.scene.grasped:
+            return SkillResult.success(
+                cleanup_best_effort=True,
+                reason="retreat_failed_after_release",
+                original_target=target,
+            )
+        return SkillResult.failure(
+            FailureCode.SDK_ERROR,
+            message="move_l failed",
+            sdk_result={"ok": False, "action": "move_l", "command": {"type": "move_l", "pose": target, "speed": self.speed}},
+        )
+
 
 class Lift(MoveL):
     def __init__(self, target_pose: Optional[List[float]] = None):
@@ -160,6 +224,37 @@ class PlaceApproach(MoveL):
             blackboard_key="place_pose",
         )
 
+    def run(self, context: SkillContext) -> SkillResult:
+        sdk = context.adapters["sdk"]
+        base_target = self.target_pose or context.blackboard.get(self.blackboard_key)
+        if not base_target:
+            return SkillResult.failure(FailureCode.NO_IK, message="Missing pose target")
+
+        release_pose = context.blackboard.get("place_release_pose")
+        approach_candidates = [
+            ("primary", base_target),
+            ("high_clearance", _offset_pose(base_target, dz=0.04)),
+            ("release_backoff", _offset_pose(release_pose, dz=0.08) if release_pose else None),
+            ("release_high_clearance", _offset_pose(release_pose, dz=0.12) if release_pose else None),
+        ]
+        attempted = []
+        for label, candidate in approach_candidates:
+            if candidate is None:
+                continue
+            result = sdk.move_l(candidate, speed=self.speed)
+            attempted.append({"label": label, "pose": candidate, "ok": bool(result.get("ok", False))})
+            if result.get("ok", False):
+                context.blackboard.set("active_place_approach_pose", candidate)
+                if hasattr(sdk, "refresh_world"):
+                    sdk.refresh_world(context.blackboard)
+                return SkillResult.success(command=result["command"], fallback_used=label if label != "primary" else "")
+
+        return SkillResult.failure(
+            FailureCode.SDK_ERROR,
+            message="move_l failed",
+            sdk_result={"attempted_targets": attempted},
+        )
+
 
 class PlaceRelease(MoveL):
     def __init__(self, target_pose: Optional[List[float]] = None):
@@ -168,6 +263,37 @@ class PlaceRelease(MoveL):
             target_pose=target_pose,
             speed=0.25,
             blackboard_key="place_release_pose",
+        )
+
+    def run(self, context: SkillContext) -> SkillResult:
+        sdk = context.adapters["sdk"]
+        base_target = self.target_pose or context.blackboard.get(self.blackboard_key)
+        if not base_target:
+            return SkillResult.failure(FailureCode.NO_IK, message="Missing pose target")
+
+        approach_pose = context.blackboard.get("active_place_approach_pose") or context.blackboard.get("place_pose")
+        release_candidates = [
+            ("primary", base_target),
+            ("softened_release", _offset_pose(base_target, dz=0.02)),
+            ("midpoint", _offset_pose(base_target, dz=0.01)),
+            ("approach_hold", approach_pose),
+        ]
+        attempted = []
+        for label, candidate in release_candidates:
+            if candidate is None:
+                continue
+            result = sdk.move_l(candidate, speed=self.speed)
+            attempted.append({"label": label, "pose": candidate, "ok": bool(result.get("ok", False))})
+            if result.get("ok", False):
+                context.blackboard.set("active_place_release_pose", candidate)
+                if hasattr(sdk, "refresh_world"):
+                    sdk.refresh_world(context.blackboard)
+                return SkillResult.success(command=result["command"], fallback_used=label if label != "primary" else "")
+
+        return SkillResult.failure(
+            FailureCode.SDK_ERROR,
+            message="move_l failed",
+            sdk_result={"attempted_targets": attempted},
         )
 
 

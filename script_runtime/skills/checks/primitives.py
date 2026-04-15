@@ -37,9 +37,9 @@ class CheckGrasp(Skill):
         super().__init__(name="CheckGrasp", timeout_s=0.5, failure_code=FailureCode.GRASP_FAIL)
 
     def run(self, context: SkillContext) -> SkillResult:
-        maniskill = context.adapters.get("maniskill")
-        if maniskill is not None and hasattr(maniskill, "is_grasped"):
-            grasped = bool(maniskill.is_grasped())
+        grasp_adapter = context.adapters.get("maniskill") or context.adapters.get("sdk")
+        if grasp_adapter is not None and hasattr(grasp_adapter, "is_grasped"):
+            grasped = bool(grasp_adapter.is_grasped())
             context.blackboard.update_world(scene={"grasped": grasped})
         if not context.world_state.scene.grasped:
             return SkillResult.failure(FailureCode.GRASP_FAIL, message="Grasp not confirmed")

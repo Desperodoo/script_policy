@@ -103,3 +103,58 @@ python -m script_runtime.runners.maniskill_grasp_sweep
 2. 再参考 ManiSkill runner 的结构理解当前验证链
 3. 然后优先新增 `robotwin2.0` 桥接和对应 runner
 4. 最后把相同任务树切到真实 `arm_control_sdk`
+
+RoboTwin 方向当前已经补上第一版桥接骨架：
+
+```bash
+python scripts/robotwin_smoke_test.py --task place_empty_cup --config demo_clean
+python -m script_runtime.runners.robotwin_pick_place
+```
+
+说明：
+- `script_runtime/adapters/robotwin_bridge.py` 负责 RoboTwin 任务加载、状态抽取、抓取候选生成和 `check_success()` 对齐
+- 当前默认对接 `place_empty_cup`
+- 这版重点是把 runtime adapter 契约和 RoboTwin 任务语义接起来，先让 `GetObjectPose / GetGraspCandidates / CheckGrasp / CheckTaskSuccess` 走同一条链
+- 资产没下载完整时，`robotwin_smoke_test.py` 会直接给出缺失项，不会误判成 Python 环境问题
+
+真实视角导出当前建议走“双轨”：
+
+```bash
+python -m script_runtime.runners.robotwin_pick_place --config script_runtime/configs/tasks/place_empty_cup_robotwin.yaml
+python -m script_runtime.runners.robotwin_capture_replay --config script_runtime/configs/tasks/place_empty_cup_robotwin.yaml
+python -m script_runtime.runners.render_robotwin_realview_summary \
+  --gif script_runtime/artifacts/pick_place-6f24ed26_rollout.gif \
+  --grounding-json script_runtime/artifacts/pick_place-6f24ed26_grounding.json \
+  --out script_runtime/artifacts/pick_place-6f24ed26_realview_summary.png
+python -m script_runtime.runners.render_robotwin_skill_snapshots \
+  --gif script_runtime/artifacts/pick_place-6f24ed26_rollout.gif \
+  --grounding-json script_runtime/artifacts/pick_place-6f24ed26_grounding.json \
+  --out-dir script_runtime/artifacts/pick_place-6f24ed26_skill_snapshots
+```
+
+说明：
+- `robotwin_pick_place` 负责主 runtime 验证
+- `robotwin_capture_replay` 是独立 capture pass，不建议重新塞回主验证路径
+- 如果 RoboTwin 完整 replay capture 仍然太慢，先直接从已有 `rollout.gif + grounding.json` 生成 `realview_summary.png`
+- `render_robotwin_skill_snapshots` 会按关键 skill 导出逐节点 PNG 和 contact sheet，当前最接近“单节点快照重放”的轻量可视化链
+
+补充说明：
+- RoboTwin 在本机默认 `rt + oidn` 渲染路径下，`head_camera` 取帧会触发非法访问，导致 runtime 退回 top-down fallback
+- 当前 `robotwin_bridge` 默认会把 `camera_shader_dir` 切到 `default`，这样可以稳定导出真实 `head_camera` 视角
+- 新的真实视角示例产物：
+  - `script_runtime/artifacts/pick_place-e08dd776_rollout.gif`
+  - `script_runtime/artifacts/pick_place-e08dd776_realview_contact_sheet.png`
+  - `script_runtime/artifacts/pick_place-2b51d938_rollout.gif`
+  - `script_runtime/artifacts/pick_place-2b51d938_realview_contact_sheet.png`
+
+当前已经开始推进下一条更复杂任务 `place_container_plate`：
+
+```bash
+python scripts/robotwin_smoke_test.py --task place_container_plate --config demo_clean --setup-demo
+python -m script_runtime.runners.robotwin_pick_place --config script_runtime/configs/tasks/place_container_plate_robotwin.yaml
+```
+
+说明：
+- 当前默认配置使用 `seed: 1`，这是已经验证成功的一组场景
+- `seed: 3` 也已成功
+- `seed: 2` 会失败在 recovery 的 `SafeRetreat`，说明当前主要瓶颈是 planner/recovery 稳定性，而不是 adapter 接线

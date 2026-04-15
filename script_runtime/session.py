@@ -10,7 +10,15 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from script_runtime.adapters import MockSDKBridge, NullLearnedModuleAdapter, SDKBridge
+from script_runtime.adapters import (
+    MockSDKBridge,
+    NullLearnedModuleAdapter,
+    NullPerceptionAdapter,
+    OraclePerceptionAdapter,
+    RoboTwinDepthPoseProvider,
+    RoboTwinBridge,
+    SDKBridge,
+)
 from script_runtime.core import SkillContext, TaskBlackboard, WorldState
 from script_runtime.executors import TraceRecorder, TreeExecutor
 from script_runtime.factory import build_default_skill_registry
@@ -85,12 +93,17 @@ class ScriptRuntimeSession:
     adapters: Dict[str, Any]
     trace_recorder: TraceRecorder
     trace_path: Optional[Path] = None
+    artifact_dir: Optional[Path] = None
     task_id: str = ""
     runtime_artifacts: Dict[str, Any] = None
 
     def run(self):
         task_id = self.task_id or f"{self.task.name}-{uuid.uuid4().hex[:8]}"
         self.blackboard.update_world(execution={"task_id": task_id})
+        run_output_dir = self._resolve_run_output_dir(task_id)
+        actual_trace_path = self._resolve_trace_output_path(task_id, run_output_dir)
+        if actual_trace_path is not None:
+            self.trace_path = actual_trace_path
         sdk = self.adapters.get("sdk")
         if sdk is not None:
             init_result = sdk.initialize()
@@ -115,9 +128,13 @@ class ScriptRuntimeSession:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
             self.trace_path.write_text(self.trace_recorder.to_jsonl(), encoding="utf-8")
         self.runtime_artifacts = {}
+        if run_output_dir is not None:
+            self.runtime_artifacts["run_dir"] = str(run_output_dir)
+        if self.trace_path is not None:
+            self.runtime_artifacts["trace_path"] = str(self.trace_path)
         if sdk is not None and hasattr(sdk, "export_episode_artifacts"):
-            artifact_dir = self.trace_path.parent if self.trace_path is not None else None
-            self.runtime_artifacts = dict(sdk.export_episode_artifacts(task_id=task_id, output_dir=artifact_dir) or {})
+            artifact_outputs = dict(sdk.export_episode_artifacts(task_id=task_id, output_dir=run_output_dir) or {})
+            self.runtime_artifacts.update(artifact_outputs)
         return result
 
     def shutdown(self) -> Dict[str, Any]:
@@ -125,6 +142,25 @@ class ScriptRuntimeSession:
         if sdk is None:
             return {"ok": True, "skipped": True}
         return sdk.shutdown()
+
+    def _resolve_run_output_dir(self, task_id: str) -> Optional[Path]:
+        base_dir = self.artifact_dir
+        if base_dir is None and self.trace_path is not None:
+            base_dir = self.trace_path.parent
+        if base_dir is None:
+            return None
+        run_dir = Path(base_dir) / task_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    def _resolve_trace_output_path(self, task_id: str, run_output_dir: Optional[Path]) -> Optional[Path]:
+        if self.trace_path is None and run_output_dir is None:
+            return None
+        if run_output_dir is None:
+            return self.trace_path
+        if self.trace_path is None:
+            return run_output_dir / f"{task_id}_trace.jsonl"
+        return run_output_dir / self.trace_path.name
 
 
 def build_pick_place_session(
@@ -148,6 +184,7 @@ def build_pick_place_session(
     adapters = {
         "sdk": sdk_bridge,
         "learned": NullLearnedModuleAdapter(),
+        "perception": OraclePerceptionAdapter(sdk_bridge) if sdk_bridge is not None else NullPerceptionAdapter(),
     }
     return ScriptRuntimeSession(
         task=task,
@@ -156,6 +193,43 @@ def build_pick_place_session(
         adapters=adapters,
         trace_recorder=TraceRecorder(),
         trace_path=Path(trace_path) if trace_path else None,
+        artifact_dir=Path(runtime["artifact_dir"]) if runtime.get("artifact_dir") else None,
+        task_id=str(runtime.get("task_id", "")),
+        runtime_artifacts={},
+    )
+
+
+def build_robotwin_pick_place_session(
+    config: Dict[str, Any],
+    registry: Optional[Any] = None,
+) -> ScriptRuntimeSession:
+    world = WorldState()
+    blackboard = TaskBlackboard(world)
+    seed_pick_place_blackboard(blackboard, config)
+
+    runtime = config.get("runtime", {})
+    task = PickPlaceTask(goal=config.get("task_goal", {}))
+    registry = registry or build_default_skill_registry()
+    trace_path = runtime.get("trace_path")
+    sdk_bridge = _build_robotwin_bridge_from_config(config)
+
+    adapters = {
+        "sdk": sdk_bridge,
+        "learned": NullLearnedModuleAdapter(),
+        "camera": sdk_bridge,
+        "perception": RoboTwinDepthPoseProvider(
+            oracle_backend=sdk_bridge,
+            use_oracle_fallback=bool(runtime.get("perception_oracle_fallback", True)),
+        ),
+    }
+    return ScriptRuntimeSession(
+        task=task,
+        registry=registry,
+        blackboard=blackboard,
+        adapters=adapters,
+        trace_recorder=TraceRecorder(),
+        trace_path=Path(trace_path) if trace_path else None,
+        artifact_dir=Path(runtime["artifact_dir"]) if runtime.get("artifact_dir") else None,
         task_id=str(runtime.get("task_id", "")),
         runtime_artifacts={},
     )
@@ -184,4 +258,43 @@ def _build_sdk_bridge_from_config(config: Dict[str, Any]) -> SDKBridge:
         gripper_tau=float(gripper.get("tau", 10.0)),
         use_linear_for_move_l=bool(robot.get("use_linear_for_move_l", True)),
         sync=bool(robot.get("sync", True)),
+    )
+
+
+def _build_robotwin_bridge_from_config(config: Dict[str, Any]) -> RoboTwinBridge:
+    robotwin = config.get("robotwin", {})
+    runtime = config.get("runtime", {})
+    object_functional_point_id = robotwin.get("object_functional_point_id", 0)
+    return RoboTwinBridge(
+        task_name=str(robotwin.get("task_name", "place_empty_cup")),
+        task_config=str(robotwin.get("task_config", "demo_clean")),
+        robotwin_root=robotwin.get("root"),
+        seed=int(robotwin.get("seed", 0)),
+        episode_index=int(robotwin.get("episode_index", 0)),
+        render_freq=int(robotwin.get("render_freq", 0)),
+        use_seed=bool(robotwin.get("use_seed", True)),
+        collect_data=bool(robotwin.get("collect_data", False)),
+        save_data=bool(robotwin.get("save_data", False)),
+        eval_mode=bool(robotwin.get("eval_mode", True)),
+        save_path=runtime.get("artifact_dir"),
+        object_attr=str(robotwin.get("object_attr", "cup")),
+        target_attr=str(robotwin.get("target_attr", "coaster")),
+        target_pose_attr=robotwin.get("target_pose_attr"),
+        target_functional_point_id=int(robotwin.get("target_functional_point_id", 0)),
+        object_functional_point_id=None if object_functional_point_id is None else int(object_functional_point_id),
+        pregrasp_distance=float(robotwin.get("pregrasp_distance", 0.1)),
+        place_approach_distance=float(robotwin.get("place_approach_distance", 0.1)),
+        place_release_distance=float(robotwin.get("place_release_distance", 0.02)),
+        retreat_distance=float(robotwin.get("retreat_distance", 0.08)),
+        place_constrain=str(robotwin.get("place_constrain", "auto")),
+        camera_shader_dir=str(robotwin.get("camera_shader_dir", "default")),
+        ray_tracing_denoiser=robotwin.get("ray_tracing_denoiser"),
+        ray_tracing_samples_per_pixel=int(robotwin.get("ray_tracing_samples_per_pixel", 32)),
+        ray_tracing_path_depth=int(robotwin.get("ray_tracing_path_depth", 8)),
+        capture_video=bool(robotwin.get("capture_video", True)),
+        capture_every_n_steps=int(robotwin.get("capture_every_n_steps", 1)),
+        capture_skills=list(robotwin.get("capture_skills", [])) or None,
+        capture_command_types=list(robotwin.get("capture_command_types", [])) or None,
+        episode_name=str(robotwin.get("episode_name", "robotwin_pick_place")),
+        active_arm=robotwin.get("active_arm"),
     )
