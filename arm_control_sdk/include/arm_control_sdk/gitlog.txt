@@ -1,0 +1,37 @@
+---------
+arm_control_sdk
+---------
+
+
+commit 1b2c77a2b2984ec44728d851c88789a21fb677e9
+Author: huangyujun <huangyujun@cvte.com>
+Date:   Tue Feb 3 18:01:05 2026 +0800
+
+    [meger]合并主分支1.0.260203
+
+commit 84a54da32609c8d6cd5e88c453442cdde8f245b6
+Author: huangyujun <huangyujun@cvte.com>
+Date:   Tue Feb 3 17:53:33 2026 +0800
+
+    [meger]合并1.0.260203
+
+commit b8e3cf5f09b68b26e0a32b3bb6dd24eca3c3a208
+Author: huangyujun <huangyujun@cvte.com>
+Date:   Tue Feb 3 17:46:08 2026 +0800
+
+    [meger]合并1.0.260203
+
+commit 5e45892ac8c76c496b4694556daeed3605690bbb
+Author: huangyujun <huangyujun@cvte.com>
+Date:   Tue Feb 3 17:24:49 2026 +0800
+
+    [feature]添加libjsoncpp线上库
+
+commit 6b5da5162a6f4582436aeba7d00d653a6307c7cd
+Author: huangyujun <huangyujun@cvte.com>
+Date:   Tue Feb 3 16:52:46 2026 +0800
+
+    [feature]添加libjsoncpp,解决不兼容问题
+
+
+
