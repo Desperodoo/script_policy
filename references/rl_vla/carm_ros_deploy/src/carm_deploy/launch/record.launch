@@ -1,0 +1,133 @@
+<?xml version="1.0"?>
+<!--
+  数据记录节点启动文件
+  
+  使用方法:
+    roslaunch carm_deploy record.launch output_dir:=/path/to/data
+    
+  参数:
+    output_dir: 输出目录
+    teleop: 是否使用拖动示教模式
+    teleop_bridge_mode:
+      - passive_shadow: 只录制 teleop shadow / candidate 观测，不切 owner
+      - upper_control: 启用 upper bridge；是否真实接管由 upper_control_enabled 决定
+-->
+<launch>
+  <!-- 输出参数 -->
+  <arg name="output_dir" default="$(env HOME)/recorded_data"/>
+  
+  <!-- 机械臂参数 -->
+  <arg name="robot_ip" default="10.42.0.101"/>
+  <arg name="robot_mode" default="3"/>  <!-- DRAG 模式 -->
+  
+  <!-- 相机参数 -->
+  <arg name="use_camera" default="false"/>
+  <arg name="camera_name" default="camera"/>
+  <arg name="camera_serial" default="218622279840"/>
+  <arg name="camera_topics" default="/$(arg camera_name)/color/image_raw"/>
+  <arg name="camera_names" default="wrist"/>
+  <arg name="primary_camera" default="wrist"/>
+  <arg name="sync_slop" default="0.02"/>
+
+  <!-- 相机流参数（默认关闭红外/点云） -->
+  <arg name="color_width" default="640"/>
+  <arg name="color_height" default="480"/>
+  <arg name="color_fps" default="30"/>
+  <arg name="depth_width" default="640"/>
+  <arg name="depth_height" default="480"/>
+  <arg name="depth_fps" default="30"/>
+  <arg name="enable_color" default="true"/>
+  <arg name="enable_depth" default="true"/>
+  <arg name="enable_infra1" default="false"/>
+  <arg name="enable_infra2" default="false"/>
+  <arg name="enable_pointcloud" default="false"/>
+  <arg name="align_depth" default="true"/>
+  <arg name="filters" default=""/>
+  
+  <!-- 记录参数 -->
+  <arg name="record_freq" default="30"/>
+  <arg name="max_episodes" default="100"/>
+  <arg name="max_steps" default="1000"/>
+  
+  <!-- 图像参数 -->
+  <arg name="image_width" default="320"/>
+  <arg name="image_height" default="240"/>
+
+  <!-- 时间线日志 -->
+  <arg name="timeline_enabled" default="true"/>
+  <arg name="timeline_log" default=""/>
+
+  <!-- Teleop uplift -->
+  <arg name="backend_url_v2" default=""/>
+  <arg name="events_v2_url" default=""/>
+  <arg name="teleop_bridge_mode" default="passive_shadow"/>
+  <arg name="pred_horizon" default="16"/>
+  <arg name="act_horizon" default="16"/>
+  <arg name="teleop_candidate_control_freq" default="50.0"/>
+  <arg name="teleop_signal_timeout_ms" default="150.0"/>
+  <arg name="upper_control_enabled" default="false"/>
+  <arg name="enable_teleop_sse" default="false"/>
+  <arg name="return_to_zero" default="false"/>
+  
+  <!-- 模式 -->
+  <arg name="teleop" default="true"/>
+  <arg name="vis" default="true"/>
+  
+  <!-- 可选：启动相机 -->
+  <include if="$(arg use_camera)" file="$(find carm_deploy)/launch/camera.launch">
+    <arg name="serial_no" value="$(arg camera_serial)"/>
+    <arg name="camera" value="$(arg camera_name)"/>
+    <arg name="color_width" value="$(arg color_width)"/>
+    <arg name="color_height" value="$(arg color_height)"/>
+    <arg name="color_fps" value="$(arg color_fps)"/>
+    <arg name="depth_width" value="$(arg depth_width)"/>
+    <arg name="depth_height" value="$(arg depth_height)"/>
+    <arg name="depth_fps" value="$(arg depth_fps)"/>
+    <arg name="enable_color" value="$(arg enable_color)"/>
+    <arg name="enable_depth" value="$(arg enable_depth)"/>
+    <arg name="enable_infra1" value="$(arg enable_infra1)"/>
+    <arg name="enable_infra2" value="$(arg enable_infra2)"/>
+    <arg name="enable_pointcloud" value="$(arg enable_pointcloud)"/>
+    <arg name="align_depth" value="$(arg align_depth)"/>
+    <arg name="filters" value="$(arg filters)"/>
+  </include>
+
+  <!-- 启动数据记录节点 -->
+  <node name="carm_data_recorder" pkg="carm_deploy" type="record_data_ros.py" output="screen">
+    <param name="output_dir" value="$(arg output_dir)"/>
+    
+    <param name="robot_ip" value="$(arg robot_ip)"/>
+    <param name="robot_mode" value="$(arg robot_mode)"/>
+    
+    <param name="camera_topics" value="$(arg camera_topics)"/>
+    <param name="camera_names" value="$(arg camera_names)"/>
+    <param name="primary_camera" value="$(arg primary_camera)"/>
+    <param name="sync_slop" value="$(arg sync_slop)"/>
+    
+    <param name="record_freq" value="$(arg record_freq)"/>
+    <param name="max_episodes" value="$(arg max_episodes)"/>
+    <param name="max_steps" value="$(arg max_steps)"/>
+    
+    <param name="image_width" value="$(arg image_width)"/>
+    <param name="image_height" value="$(arg image_height)"/>
+
+    <param name="timeline_enabled" value="$(arg timeline_enabled)"/>
+    <param name="timeline_log" value="$(arg timeline_log)"/>
+
+    <!-- Teleop uplift / ownership bridge -->
+    <param name="backend_url_v2" value="$(arg backend_url_v2)"/>
+    <param name="events_v2_url" value="$(arg events_v2_url)"/>
+    <param name="teleop_bridge_mode" value="$(arg teleop_bridge_mode)"/>
+    <param name="pred_horizon" value="$(arg pred_horizon)"/>
+    <param name="act_horizon" value="$(arg act_horizon)"/>
+    <param name="teleop_candidate_control_freq" value="$(arg teleop_candidate_control_freq)"/>
+    <param name="teleop_signal_timeout_ms" value="$(arg teleop_signal_timeout_ms)"/>
+    <param name="upper_control_enabled" value="$(arg upper_control_enabled)"/>
+    <param name="enable_teleop_sse" value="$(arg enable_teleop_sse)"/>
+    <param name="return_to_zero" value="$(arg return_to_zero)"/>
+    
+    <param name="teleop" value="$(arg teleop)"/>
+    <param name="vis" value="$(arg vis)"/>
+  </node>
+  
+</launch>

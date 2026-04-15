@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<!--
+  推理节点启动文件
+  
+  使用方法:
+    roslaunch carm_ros_deploy inference.launch pretrain:=/path/to/model.pt
+    
+  参数:
+    pretrain: 模型路径
+    robot_ip: 机器人 IP
+    safety_config: 安全配置文件（必填）
+    
+  安全注意:
+    - 默认使用 PF 模式 (mode=4, 位力混合模式)
+    - 严禁使用 Position 模式 (mode=1)
+-->
+<launch>
+  <!-- 机械臂参数 -->
+  <arg name="robot_ip" default="10.42.0.101"/>
+  <arg name="robot_mode" default="4"/>  <!-- PF 位力混合模式 (严禁使用 mode=1 Position 模式!) -->
+  <arg name="robot_tau" default="10"/>
+  
+  <!-- 初始位姿 -->
+  <arg name="arm_init_pose" default="0.2475 0.0014 0.3251 0.9996 -0.0034 0.0255 -0.0074"/>
+  <arg name="arm_init_gripper" default="0.078"/>
+  
+  <!-- 相机参数 -->
+  <arg name="camera_name" default="camera"/>
+  <arg name="camera_topics" default="/$(arg camera_name)/color/image_raw"/>
+  <arg name="camera_names" default=""/>
+  <arg name="primary_camera" default=""/>
+  <arg name="sync_slop" default="0.02"/>
+  
+  <!-- 策略参数 -->
+  <arg name="pretrain" default=""/>
+  <arg name="desire_inference_freq" default="30"/>
+  <arg name="temporal_factor_k" default="0.05"/>
+  <arg name="safety_config" default="$(find carm_deploy)/safety_config.json"/>
+  
+  <!-- 控制参数 -->
+  <arg name="pos_lookahead_step" default="1"/>
+  <arg name="pos_lookahead_duration" default="0.015"/>
+  <arg name="not_origin" default="false"/>
+  
+  <!-- 可视化 -->
+  <arg name="vis" default="true"/>
+  
+  <!-- 启动推理节点 -->
+  <node name="carm_inference" pkg="carm_deploy" type="inference_ros.py" output="screen">
+    <param name="robot_ip" value="$(arg robot_ip)"/>
+    <param name="robot_mode" value="$(arg robot_mode)"/>
+    <param name="robot_tau" value="$(arg robot_tau)"/>
+    
+    <param name="arm_init_pose" value="$(arg arm_init_pose)"/>
+    <param name="arm_init_gripper" value="$(arg arm_init_gripper)"/>
+    
+    <param name="camera_topics" value="$(arg camera_topics)"/>
+    <param name="camera_names" value="$(arg camera_names)"/>
+    <param name="primary_camera" value="$(arg primary_camera)"/>
+    <param name="sync_slop" value="$(arg sync_slop)"/>
+    
+    <param name="pretrain" value="$(arg pretrain)"/>
+    <param name="desire_inference_freq" value="$(arg desire_inference_freq)"/>
+    <param name="temporal_factor_k" value="$(arg temporal_factor_k)"/>
+    <param name="safety_config" value="$(arg safety_config)"/>
+    
+    <param name="pos_lookahead_step" value="$(arg pos_lookahead_step)"/>
+    <param name="pos_lookahead_duration" value="$(arg pos_lookahead_duration)"/>
+    <param name="not_origin" value="$(arg not_origin)"/>
+    
+    <param name="vis" value="$(arg vis)"/>
+  </node>
+  
+</launch>

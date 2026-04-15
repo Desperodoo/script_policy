@@ -2,10 +2,21 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
+.vscode/
 
 script_runtime/artifacts/
 *.jsonl
 *.gif
 *.png
+
+third_party/RoboTwin/.git/
+third_party/RoboTwin/assets/.cache/
+third_party/RoboTwin/assets/*.zip
+third_party/RoboTwin/assets/background_texture/
+third_party/RoboTwin/assets/embodiments/
+third_party/RoboTwin/assets/objects/
+third_party/RoboTwin/envs/curobo/
+
+references/rl_vla/carm_ros_deploy/src/realsense-ros/realsense2_description/meshes/
 
 .DS_Store
