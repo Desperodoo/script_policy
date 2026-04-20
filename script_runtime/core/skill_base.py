@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional, Tuple
 from .failure_codes import FailureCode
 from .result_types import RecoveryAction, SkillResult, TraceEvent
 
+REFRESH_REASON_SCRATCH_KEY = "_refresh_reason"
+
 
 @dataclass
 class SkillContext:
@@ -93,3 +95,33 @@ class Skill:
             payload=result.payload,
         )
         context.emit_trace(event)
+
+
+def set_pending_refresh_reason(blackboard: Any, reason: str) -> None:
+    if blackboard is None or not hasattr(blackboard, "set"):
+        return
+    blackboard.set(REFRESH_REASON_SCRATCH_KEY, str(reason or "unspecified"))
+
+
+def clear_pending_refresh_reason(blackboard: Any) -> None:
+    if blackboard is None or not hasattr(blackboard, "delete"):
+        return
+    blackboard.delete(REFRESH_REASON_SCRATCH_KEY)
+
+
+def consume_refresh_reason(blackboard: Any, default: str = "unspecified") -> str:
+    if blackboard is None or not hasattr(blackboard, "get"):
+        return default
+    reason = str(blackboard.get(REFRESH_REASON_SCRATCH_KEY, default) or default)
+    clear_pending_refresh_reason(blackboard)
+    return reason
+
+
+def request_world_refresh(context: SkillContext, sdk: Any, reason: str) -> Any:
+    if sdk is None or not hasattr(sdk, "refresh_world"):
+        return None
+    set_pending_refresh_reason(context.blackboard, reason)
+    try:
+        return sdk.refresh_world(context.blackboard)
+    finally:
+        clear_pending_refresh_reason(context.blackboard)

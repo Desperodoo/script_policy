@@ -51,14 +51,40 @@
 - 观察：
   - `seed=1` 成功
   - `seed=3` 成功
-  - `seed=2` 较早版本失败在 recovery 的 `SafeRetreat`
-  - 当前更新后的判断是：
-    - `SafeRetreat` 已基本接住 pregrasp 失败
-    - `GetGraspCandidates` 也已不再停留在“只有单 candidate”
-    - 当前更核心的问题是：
-      - 多组 `depth_synthesized` 候选虽然会被尝试
-      - 但它们的 pregrasp orientation / approach pose 对 planner 不友好
-      - 结果是 candidate 数量增加了，planner feasibility 仍不足
+  - 2026-04-16 最新复验中：
+    - `seed=2` 的最新 run 为：
+      - `script_runtime/artifacts/robotwin_place_container_plate/pick_place-49074511/`
+    - 这次已经不再卡在 `GoPregrasp`
+    - `GetGraspCandidates` 已稳定输出：
+      - `candidate_source=oracle_feasibility_first`
+      - `top = contact_0 / Success`
+    - 左臂链路当前已经能够推进到：
+      - `GoPregrasp`
+      - `ExecuteGraspPhase`
+      - `Lift`
+      - `PlaceApproach`
+      - `PlaceRelease`
+      - `OpenGripper`
+      - `Retreat`
+      - `GoHome`
+      - `CheckTaskSuccess`
+    - 但最终 `env.check_success()` 仍返回 `false`
+  - 这说明：
+    - feasibility-first grasp selection 已经奏效
+    - 当前复杂任务的主瓶颈已经从“抓取接近不可达”进一步推进到：
+      - `ExecuteGraspPhase` 的抓取稳定性
+      - 放置末端几何和环境成功判定的对齐
+  - 2026-04-16 新增 release 末端诊断：
+    - `script_runtime/artifacts/robotwin_place_container_plate/release_diag_seed2/`
+    - 目前可以直接从 trace 读到：
+      - `PlaceRelease` 前 `object_to_target_center_delta.xy_norm ≈ 0.184`
+      - `OpenGripper` 后约 `0.182`
+      - `Retreat` 后短暂约 `0.177`
+      - `CheckTaskSuccess` settle 前后约 `0.185`
+    - 这意味着：
+      - release 后确实存在小幅滑移
+      - 但主误差并不是在 settle 阶段才出现
+      - 更大的问题仍是 release 前 center placement 本身不够准
 
 ## 横向结论
 
@@ -75,7 +101,10 @@
 - `place_empty_cup`：最稳，适合作为 regression baseline
 - `place_mouse_pad`：已经具备完整放置闭环，适合作为“表面放置语义”样例
 - `place_container_plate`：已接通，但对 seed 更敏感，当前应作为“下一条重点打磨的复杂任务主线”
-- 当前重点不再是修 `SafeRetreat`，而是修 planner-friendly grasp / pregrasp generation
+- 当前重点不再是修 `SafeRetreat`，而是：
+  - 一边继续修 planner-friendly grasp / pregrasp generation
+  - 一边开始正面处理左臂 `PlaceApproach / PlaceRelease` 的几何与规划稳定性
+  - 并把这些反复出现的候选生成逻辑抽成共享 planning wheel，而不是继续堆回 task-specific patch
 
 ### 感知层
 
@@ -92,9 +121,9 @@
 
 1. 继续打磨 `place_container_plate`
 - 优先解决：
-  - planner-friendly grasp / pregrasp pose 生成
-  - `GoPregrasp` 可达性
-  - `PlaceApproach / PlaceRelease` 稳定性
+  - `ExecuteGraspPhase` 的抓取稳定性
+  - `PlaceApproach / PlaceRelease` 稳定性，尤其是左臂 case
+  - nominal runtime success 与 `env.check_success()` 的对齐
 - 目标：
   - 把“有成功 seed”推进成“更稳的复杂任务主线”
 
@@ -111,3 +140,10 @@
   - 持续导出 component diagnostics
 - 对 grasp / planning：
   - 增加 candidate feasibility / planner failure 的对比视图
+- 对当前阶段需要特别注意：
+  - 文档里不能把“`Unknown` 变少了”误写成“planner parsing 已修完”
+  - 当前真实状态是：
+    - candidate family 已明显增强
+    - 左臂前段成功率已提升
+    - 部分原来误判成 `Unknown` 的候选，现在能显示真实 `Failure`
+    - 但 planner feedback 解析仍未完全闭环

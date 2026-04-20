@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from script_runtime.adapters import (
+    FMFirstGraspStackAdapter,
     MockSDKBridge,
     NullLearnedModuleAdapter,
     NullPerceptionAdapter,
@@ -18,10 +19,13 @@ from script_runtime.adapters import (
     RoboTwinDepthPoseProvider,
     RoboTwinBridge,
     SDKBridge,
+    build_default_fm_first_grasp_stack,
 )
 from script_runtime.core import SkillContext, TaskBlackboard, WorldState
+from script_runtime.core.skill_base import clear_pending_refresh_reason, set_pending_refresh_reason
 from script_runtime.executors import TraceRecorder, TreeExecutor
 from script_runtime.factory import build_default_skill_registry
+from script_runtime.place import ClosedLoopPlaceModule, HeuristicPlaceModule
 from script_runtime.tasks.pick_place import PickPlaceTask
 
 
@@ -39,6 +43,9 @@ def seed_pick_place_blackboard(blackboard: TaskBlackboard, config: Dict[str, Any
     task_goal = config.get("task_goal", {})
     poses = config.get("poses", {})
     gripper = config.get("gripper", {})
+    grasp_semantics = config.get("grasp_semantics", {})
+    runtime = config.get("runtime", {})
+    robotwin = config.get("robotwin", {})
 
     blackboard.update_world(
         perception={
@@ -80,6 +87,24 @@ def seed_pick_place_blackboard(blackboard: TaskBlackboard, config: Dict[str, Any
         blackboard.set("open_gripper_width", gripper["open_width"])
     if "close_width" in gripper:
         blackboard.set("close_gripper_width", gripper["close_width"])
+    if runtime.get("artifact_dir"):
+        blackboard.set("runtime_artifact_dir", runtime["artifact_dir"])
+    if "pregrasp_distance" in robotwin:
+        blackboard.set("pregrasp_distance", robotwin["pregrasp_distance"])
+    if grasp_semantics:
+        if "required" in grasp_semantics:
+            blackboard.set("semantic_grasp_required", bool(grasp_semantics.get("required")))
+        if "required_affordances" in grasp_semantics:
+            blackboard.set("required_grasp_affordances", list(grasp_semantics.get("required_affordances") or []))
+        if "incompatible_affordances" in grasp_semantics:
+            blackboard.set(
+                "incompatible_grasp_affordances",
+                list(grasp_semantics.get("incompatible_affordances") or []),
+            )
+        if "visual_review_required" in grasp_semantics:
+            blackboard.set("visual_review_required", bool(grasp_semantics.get("visual_review_required")))
+        if "overrides" in grasp_semantics:
+            blackboard.set("grasp_affordance_overrides", list(grasp_semantics.get("overrides") or []))
     return blackboard
 
 
@@ -96,6 +121,8 @@ class ScriptRuntimeSession:
     artifact_dir: Optional[Path] = None
     task_id: str = ""
     runtime_artifacts: Dict[str, Any] = None
+    export_artifacts: bool = True
+    write_trace: bool = True
 
     def run(self):
         task_id = self.task_id or f"{self.task.name}-{uuid.uuid4().hex[:8]}"
@@ -111,7 +138,9 @@ class ScriptRuntimeSession:
                 raise RuntimeError(f"Failed to initialize SDK runtime: {init_result}")
             if hasattr(sdk, "attach_blackboard"):
                 sdk.attach_blackboard(self.blackboard)
+            set_pending_refresh_reason(self.blackboard, "session_initialize")
             sdk.refresh_world(self.blackboard)
+            clear_pending_refresh_reason(self.blackboard)
 
         root = self.task.root or self.task.build(self.registry)
         executor = TreeExecutor(root=root, registry=self.registry, trace_recorder=self.trace_recorder)
@@ -123,16 +152,18 @@ class ScriptRuntimeSession:
         )
         result = executor.run(context)
         if sdk is not None:
+            set_pending_refresh_reason(self.blackboard, "session_finalize")
             sdk.refresh_world(self.blackboard)
-        if self.trace_path is not None:
+            clear_pending_refresh_reason(self.blackboard)
+        if self.write_trace and self.trace_path is not None:
             self.trace_path.parent.mkdir(parents=True, exist_ok=True)
             self.trace_path.write_text(self.trace_recorder.to_jsonl(), encoding="utf-8")
         self.runtime_artifacts = {}
         if run_output_dir is not None:
             self.runtime_artifacts["run_dir"] = str(run_output_dir)
-        if self.trace_path is not None:
+        if self.write_trace and self.trace_path is not None:
             self.runtime_artifacts["trace_path"] = str(self.trace_path)
-        if sdk is not None and hasattr(sdk, "export_episode_artifacts"):
+        if self.export_artifacts and sdk is not None and hasattr(sdk, "export_episode_artifacts"):
             artifact_outputs = dict(sdk.export_episode_artifacts(task_id=task_id, output_dir=run_output_dir) or {})
             self.runtime_artifacts.update(artifact_outputs)
         return result
@@ -184,7 +215,8 @@ def build_pick_place_session(
     adapters = {
         "sdk": sdk_bridge,
         "learned": NullLearnedModuleAdapter(),
-        "perception": OraclePerceptionAdapter(sdk_bridge) if sdk_bridge is not None else NullPerceptionAdapter(),
+        "perception": _build_perception_adapter_from_config(config, sdk_bridge=sdk_bridge, robotwin=False),
+        "place_module": _build_place_module_from_config(config),
     }
     return ScriptRuntimeSession(
         task=task,
@@ -196,6 +228,8 @@ def build_pick_place_session(
         artifact_dir=Path(runtime["artifact_dir"]) if runtime.get("artifact_dir") else None,
         task_id=str(runtime.get("task_id", "")),
         runtime_artifacts={},
+        export_artifacts=bool(runtime.get("export_artifacts", True)),
+        write_trace=bool(runtime.get("write_trace", True)),
     )
 
 
@@ -217,10 +251,8 @@ def build_robotwin_pick_place_session(
         "sdk": sdk_bridge,
         "learned": NullLearnedModuleAdapter(),
         "camera": sdk_bridge,
-        "perception": RoboTwinDepthPoseProvider(
-            oracle_backend=sdk_bridge,
-            use_oracle_fallback=bool(runtime.get("perception_oracle_fallback", True)),
-        ),
+        "perception": _build_perception_adapter_from_config(config, sdk_bridge=sdk_bridge, robotwin=True),
+        "place_module": _build_place_module_from_config(config),
     }
     return ScriptRuntimeSession(
         task=task,
@@ -232,6 +264,8 @@ def build_robotwin_pick_place_session(
         artifact_dir=Path(runtime["artifact_dir"]) if runtime.get("artifact_dir") else None,
         task_id=str(runtime.get("task_id", "")),
         runtime_artifacts={},
+        export_artifacts=bool(runtime.get("export_artifacts", True)),
+        write_trace=bool(runtime.get("write_trace", True)),
     )
 
 
@@ -259,6 +293,106 @@ def _build_sdk_bridge_from_config(config: Dict[str, Any]) -> SDKBridge:
         use_linear_for_move_l=bool(robot.get("use_linear_for_move_l", True)),
         sync=bool(robot.get("sync", True)),
     )
+
+
+def _build_perception_adapter_from_config(
+    config: Dict[str, Any],
+    *,
+    sdk_bridge: Any | None,
+    robotwin: bool,
+) -> Any:
+    runtime = config.get("runtime", {})
+    stack_cfg = dict(config.get("perception_stack") or runtime.get("perception_stack") or {})
+    stack_type = str(stack_cfg.get("type", "") or "").strip().lower()
+
+    if stack_type in {"fm", "fm_first", "fm-first", "foundation_model"}:
+        return _build_fm_first_grasp_stack_from_config(config, sdk_bridge=sdk_bridge, robotwin=robotwin)
+
+    if robotwin:
+        return RoboTwinDepthPoseProvider(
+            oracle_backend=sdk_bridge,
+            use_oracle_fallback=bool(runtime.get("perception_oracle_fallback", True)),
+        )
+    if sdk_bridge is not None:
+        return OraclePerceptionAdapter(sdk_bridge)
+    return NullPerceptionAdapter()
+
+
+def _build_fm_first_grasp_stack_from_config(
+    config: Dict[str, Any],
+    *,
+    sdk_bridge: Any | None,
+    robotwin: bool,
+) -> FMFirstGraspStackAdapter:
+    runtime = config.get("runtime", {})
+    stack_cfg = dict(config.get("perception_stack") or runtime.get("perception_stack") or {})
+    repos = dict(stack_cfg.get("repos") or {})
+    enabled = dict(stack_cfg.get("enabled") or {})
+    grounded_cfg = dict(stack_cfg.get("grounded_sam2") or {})
+    foundationpose_cfg = dict(stack_cfg.get("foundationpose") or {})
+    contact_graspnet_cfg = dict(stack_cfg.get("contact_graspnet") or {})
+
+    depth_provider = None
+    if robotwin:
+        depth_provider = RoboTwinDepthPoseProvider(
+            oracle_backend=sdk_bridge,
+            use_oracle_fallback=bool(runtime.get("perception_oracle_fallback", True)),
+            foreground_offset_mm=float(stack_cfg.get("foreground_offset_mm", 18.0)),
+            min_component_area=int(stack_cfg.get("min_component_area", 120)),
+            backend_candidate_reads=int(stack_cfg.get("backend_candidate_reads", 2)),
+        )
+
+    return build_default_fm_first_grasp_stack(
+        oracle_backend=sdk_bridge,
+        robotwin_depth_provider=depth_provider,
+        grounded_sam2_repo=repos.get("grounded_sam2"),
+        grounded_sam2_model_id=str(grounded_cfg.get("model_id", "IDEA-Research/grounding-dino-tiny")),
+        grounded_sam2_box_threshold=float(grounded_cfg.get("box_threshold", 0.35)),
+        grounded_sam2_text_threshold=float(grounded_cfg.get("text_threshold", 0.25)),
+        grounded_sam2_max_detections=int(grounded_cfg.get("max_detections", 8)),
+        grounded_sam2_device=grounded_cfg.get("device"),
+        foundationpose_repo=repos.get("foundationpose"),
+        foundationpose_python_bin=foundationpose_cfg.get("python_bin"),
+        foundationpose_timeout_s=int(foundationpose_cfg.get("timeout_s", 180)),
+        contact_graspnet_repo=repos.get("contact_graspnet"),
+        contact_graspnet_python_bin=contact_graspnet_cfg.get("python_bin"),
+        contact_graspnet_timeout_s=int(contact_graspnet_cfg.get("timeout_s", 180)),
+        contact_graspnet_max_candidates=int(contact_graspnet_cfg.get("max_candidates", 12)),
+        graspnet_repo=repos.get("graspnet_baseline"),
+        graspgen_repo=repos.get("graspgen"),
+        include_oracle_pose=bool(enabled.get("oracle_pose", True)),
+        include_oracle_grasp=bool(enabled.get("oracle_grasp", True)),
+        include_depth_pose=bool(enabled.get("robotwin_depth_pose", robotwin)),
+        include_depth_grasp=bool(enabled.get("robotwin_depth_grasp", robotwin)),
+    )
+
+
+def _build_place_module_from_config(config: Dict[str, Any]) -> Any:
+    runtime = config.get("runtime", {})
+    module_cfg = dict(config.get("place_module") or runtime.get("place_module") or {})
+    module_type = str(module_cfg.get("type", "heuristic")).strip().lower()
+    if module_type in {"", "heuristic", "default"}:
+        return HeuristicPlaceModule()
+    if module_type == "closed_loop":
+        return ClosedLoopPlaceModule(
+            max_alignment_steps=int(module_cfg.get("max_alignment_steps", 3)),
+            xy_gain=float(module_cfg.get("xy_gain", 0.45)),
+            z_gain=float(module_cfg.get("z_gain", 0.2)),
+            xy_step_limit=float(module_cfg.get("xy_step_limit", 0.03)),
+            z_step_limit=float(module_cfg.get("z_step_limit", 0.01)),
+            alignment_speed=float(module_cfg.get("alignment_speed", 0.12)),
+            target_xy_tolerance=float(module_cfg.get("target_xy_tolerance", 0.03)),
+            target_z_tolerance=float(module_cfg.get("target_z_tolerance", 0.015)),
+            min_xy_improvement=float(module_cfg.get("min_xy_improvement", 0.0001)),
+            max_xy_worsening=float(module_cfg.get("max_xy_worsening", 0.002)),
+            response_prior=float(module_cfg.get("response_prior", 0.18)),
+            response_ridge=float(module_cfg.get("response_ridge", 0.06)),
+            response_ema=float(module_cfg.get("response_ema", 0.6)),
+            response_diag_min=float(module_cfg.get("response_diag_min", 0.03)),
+            response_diag_max=float(module_cfg.get("response_diag_max", 0.75)),
+            response_cross_limit=float(module_cfg.get("response_cross_limit", 0.25)),
+        )
+    raise ValueError(f"Unsupported place_module.type: {module_type}")
 
 
 def _build_robotwin_bridge_from_config(config: Dict[str, Any]) -> RoboTwinBridge:

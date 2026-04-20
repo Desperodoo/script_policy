@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from script_runtime.planning import (
+    build_grasp_candidate_variants,
+    build_synthesized_grasp_candidates,
+    quat_normalize,
+)
 
 
 @dataclass
@@ -103,14 +108,17 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
         use_oracle_fallback: bool = True,
         foreground_offset_mm: float = 18.0,
         min_component_area: int = 120,
+        backend_candidate_reads: int = 2,
     ):
         self.oracle_backend = oracle_backend
         self.use_oracle_fallback = bool(use_oracle_fallback)
         self.foreground_offset_mm = float(foreground_offset_mm)
         self.min_component_area = int(min_component_area)
+        self.backend_candidate_reads = max(int(backend_candidate_reads), 1)
         self.last_pose_source = "none"
         self.last_grasp_source = "none"
         self.last_component_diagnostics: List[Dict[str, Any]] = []
+        self.last_grasp_diagnostics: List[Dict[str, Any]] = []
 
     def get_object_pose(self, observation: PerceptionObservation, context: Any | None = None) -> Optional[List[float]]:
         pose = self._estimate_from_depth(observation)
@@ -128,9 +136,7 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
         observation: PerceptionObservation,
         context: Any | None = None,
     ) -> Optional[List[Dict[str, Any]]]:
-        base_candidates = None
-        if self.oracle_backend is not None and hasattr(self.oracle_backend, "get_grasp_candidates"):
-            base_candidates = self.oracle_backend.get_grasp_candidates()
+        base_candidates, feasible_backend = self._collect_backend_grasp_candidates(context=context)
         object_pose = self._estimate_from_depth(observation)
         if not base_candidates:
             synthesized = self._synthesize_grasp_candidates_from_pose(object_pose=object_pose, context=context)
@@ -141,9 +147,163 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
             self.last_grasp_source = "depth_synthesized"
             return expanded
 
+        if feasible_backend:
+            self.last_grasp_source = "oracle_feasibility_first"
+            return base_candidates
+
         expanded = self._expand_grasp_candidates(base_candidates, object_pose=object_pose, context=context)
         self.last_grasp_source = "oracle_augmented" if len(expanded) > len(base_candidates) else "oracle_base"
         return expanded
+
+    def _collect_backend_grasp_candidates(
+        self,
+        context: Any | None = None,
+    ) -> tuple[Optional[List[Dict[str, Any]]], bool]:
+        candidate_sets: List[List[Dict[str, Any]]] = []
+
+        if self.oracle_backend is not None and hasattr(self.oracle_backend, "get_grasp_candidates"):
+            for _ in range(self.backend_candidate_reads):
+                batch = self.oracle_backend.get_grasp_candidates()
+                if batch:
+                    candidate_sets.append(batch)
+
+        cached = self._cached_grasp_candidates(context=context)
+        if cached:
+            candidate_sets.append(cached)
+
+        merged = self._merge_backend_candidate_sets(candidate_sets)
+        if not merged:
+            return None, False
+        if self._has_backend_feasible_candidate(merged):
+            return self._prefer_backend_feasible_candidates(merged), True
+        return merged, False
+
+    def _merge_backend_candidate_sets(
+        self,
+        candidate_sets: List[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        merged: Dict[tuple, Dict[str, Any]] = {}
+        order: List[tuple] = []
+        for read_index, candidates in enumerate(candidate_sets):
+            for candidate_index, candidate in enumerate(candidates or []):
+                item = dict(candidate)
+                item.setdefault("backend_read_index", read_index)
+                item.setdefault("backend_candidate_index", candidate_index)
+                key = self._backend_candidate_identity(item)
+                existing = merged.get(key)
+                if existing is None:
+                    merged[key] = item
+                    order.append(key)
+                    continue
+                merged[key] = self._merge_backend_candidate(existing, item)
+        return [merged[key] for key in order]
+
+    @classmethod
+    def _merge_backend_candidate(
+        cls,
+        existing: Dict[str, Any],
+        incoming: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        left = dict(existing)
+        right = dict(incoming)
+        winner = left
+        loser = right
+        if cls._candidate_merge_preference(right) > cls._candidate_merge_preference(left):
+            winner = right
+            loser = left
+        merged = dict(winner)
+        for key, value in loser.items():
+            if key not in merged or merged.get(key) in (None, "", [], {}):
+                merged[key] = value
+        read_indices = []
+        for source in (left, right):
+            if source.get("backend_read_indices"):
+                read_indices.extend(list(source["backend_read_indices"]))
+            elif source.get("backend_read_index") is not None:
+                read_indices.append(int(source["backend_read_index"]))
+        if read_indices:
+            merged["backend_read_indices"] = sorted(set(read_indices))
+        return merged
+
+    @staticmethod
+    def _candidate_merge_preference(candidate: Dict[str, Any]) -> tuple:
+        status_rank = RoboTwinDepthPoseProvider._planner_status_rank(candidate.get("planner_status"))
+        score = float(candidate.get("score", 0.0))
+        waypoint_count = candidate.get("planner_waypoint_count")
+        waypoint_sort = -10**9
+        if waypoint_count is not None:
+            waypoint_sort = -int(waypoint_count)
+        return status_rank, score, waypoint_sort
+
+    @classmethod
+    def _backend_candidate_identity(cls, candidate: Dict[str, Any]) -> tuple:
+        contact = candidate.get("contact_point_id")
+        arm = candidate.get("arm")
+        pose_key, pregrasp_key = cls._candidate_key(candidate)
+        if contact is not None:
+            return ("contact", int(contact), str(arm or ""))
+        return ("pose", str(arm or ""), pose_key, pregrasp_key)
+
+    @staticmethod
+    def _cached_grasp_candidates(context: Any | None = None) -> Optional[List[Dict[str, Any]]]:
+        if context is None:
+            return None
+        blackboard = getattr(context, "blackboard", None)
+        if blackboard is not None and hasattr(blackboard, "get"):
+            cached = blackboard.get("grasp_candidates")
+            if cached:
+                return [dict(candidate) for candidate in cached]
+        world_state = getattr(context, "world_state", None)
+        learned = None if world_state is None else getattr(world_state, "learned", None)
+        cached = None if learned is None else getattr(learned, "grasp_candidates", None)
+        if cached:
+            return [dict(candidate) for candidate in cached]
+        return None
+
+    @staticmethod
+    def _has_backend_feasible_candidate(base_candidates: Optional[List[Dict[str, Any]]]) -> bool:
+        if not base_candidates:
+            return False
+        return any(str(candidate.get("planner_status", "Unknown")) == "Success" for candidate in base_candidates)
+
+    def _prefer_backend_feasible_candidates(
+        self,
+        base_candidates: List[Dict[str, Any]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not self._has_backend_feasible_candidate(base_candidates):
+            return None
+        ranked = sorted(
+            [dict(candidate) for candidate in base_candidates],
+            key=lambda item: (
+                -self._planner_status_rank(item.get("planner_status")),
+                -float(item.get("score", 0.0)),
+                int(item.get("planner_waypoint_count") or 10**9),
+            ),
+        )
+        self.last_grasp_diagnostics = [
+            {
+                "variant_label": str(candidate.get("variant_label", "")),
+                "score": float(candidate.get("score", 0.0)),
+                "planner_status": str(candidate.get("planner_status", "Unknown")),
+                "planner_waypoint_count": candidate.get("planner_waypoint_count"),
+                "pose_xyz": [float(v) for v in list(candidate.get("pose") or [])[:3]],
+                "pregrasp_xyz": [float(v) for v in list(candidate.get("pregrasp_pose") or [])[:3]],
+                "planner_debug": candidate.get("planner_debug"),
+            }
+            for candidate in ranked[:12]
+        ]
+        return ranked
+
+    @staticmethod
+    def _planner_status_rank(status: Any) -> int:
+        normalized = str(status or "Unknown")
+        if normalized == "Success":
+            return 3
+        if normalized in {"Partial", "Fallback"}:
+            return 2
+        if normalized in {"Failure", "Fail"}:
+            return 0
+        return 1
 
     def _estimate_from_depth(self, observation: PerceptionObservation) -> Optional[List[float]]:
         depth = observation.depth
@@ -306,8 +466,15 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
     ) -> List[Dict[str, Any]]:
         expanded: List[Dict[str, Any]] = []
         seen = set()
+        current_eef = None
+        if context is not None and hasattr(context, "world_state"):
+            current_eef = getattr(context.world_state.robot, "eef_pose", None)
         for index, candidate in enumerate(base_candidates):
-            variants = self._candidate_variants(candidate, object_pose=object_pose, context=context)
+            variants = build_grasp_candidate_variants(
+                candidate=candidate,
+                object_pose=object_pose,
+                current_eef=current_eef,
+            )
             for variant in variants:
                 key = self._candidate_key(variant)
                 if key in seen:
@@ -318,75 +485,6 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
                 variant.setdefault("source_index", index)
                 expanded.append(variant)
         return self._rank_variants_with_reachability(expanded, context=context)
-
-    def _candidate_variants(
-        self,
-        candidate: Dict[str, Any],
-        object_pose: Optional[List[float]] = None,
-        context: Any | None = None,
-    ) -> List[Dict[str, Any]]:
-        pose = list(candidate.get("pose") or [])
-        if len(pose) < 7:
-            return []
-        pregrasp = list(candidate.get("pregrasp_pose") or [])
-        if len(pregrasp) < 7:
-            pregrasp = list(pose)
-            pregrasp[2] += 0.08
-
-        grasp_xyz = np.asarray(pose[:3], dtype=np.float64)
-        pregrasp_xyz = np.asarray(pregrasp[:3], dtype=np.float64)
-        approach_vec = pregrasp_xyz - grasp_xyz
-        approach_norm = float(np.linalg.norm(approach_vec))
-        if approach_norm < 1e-6:
-            approach_dir = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
-        else:
-            approach_dir = approach_vec / approach_norm
-        lateral = np.cross(approach_dir, np.asarray([0.0, 0.0, 1.0], dtype=np.float64))
-        lateral_norm = float(np.linalg.norm(lateral))
-        if lateral_norm < 1e-6:
-            lateral = np.asarray([0.0, 1.0, 0.0], dtype=np.float64)
-        else:
-            lateral = lateral / lateral_norm
-
-        current_eef = None
-        if context is not None and hasattr(context, "world_state"):
-            current_eef = getattr(context.world_state.robot, "eef_pose", None)
-
-        specs = [("base", np.zeros(3), np.zeros(3), 1.0)]
-        if current_eef is not None and len(current_eef) >= 3:
-            current_xyz = np.asarray(current_eef[:3], dtype=np.float64)
-            reach_shift = np.clip((current_xyz - pregrasp_xyz) * 0.28, -0.04, 0.04)
-            specs.append(("reach_relief", np.zeros(3), reach_shift + np.asarray([0.0, 0.0, 0.015]), 0.985))
-        if object_pose is not None and len(object_pose) >= 3:
-            object_xyz = np.asarray(object_pose[:3], dtype=np.float64)
-            recenter = np.clip(object_xyz - grasp_xyz, -0.025, 0.025)
-            specs.append(("vision_recenter", recenter, recenter + np.asarray([0.0, 0.0, 0.02]), 0.965))
-        specs.extend(
-            [
-                ("pregrasp_high", np.zeros(3), np.asarray([0.0, 0.0, 0.04]), 0.95),
-                ("lateral_pos", lateral * 0.012, lateral * 0.025 + np.asarray([0.0, 0.0, 0.02]), 0.92),
-                ("lateral_neg", -lateral * 0.012, -lateral * 0.025 + np.asarray([0.0, 0.0, 0.02]), 0.91),
-                ("pregrasp_backoff", np.zeros(3), approach_dir * 0.035 + np.asarray([0.0, 0.0, 0.015]), 0.88),
-            ]
-        )
-
-        variants: List[Dict[str, Any]] = []
-        for label, grasp_delta, pregrasp_delta, base_score in specs:
-            variant = dict(candidate)
-            variant_pose = list(pose)
-            variant_pregrasp = list(pregrasp)
-            for axis in range(3):
-                variant_pose[axis] = float(grasp_xyz[axis] + grasp_delta[axis])
-                variant_pregrasp[axis] = float(pregrasp_xyz[axis] + pregrasp_delta[axis])
-            variant["pose"] = variant_pose
-            variant["pregrasp_pose"] = variant_pregrasp
-            variant["variant_label"] = label
-            variant["score"] = float(base_score)
-            if current_eef is not None and len(current_eef) >= 3:
-                dist = float(np.linalg.norm(np.asarray(current_eef[:3], dtype=np.float64) - np.asarray(variant_pregrasp[:3], dtype=np.float64)))
-                variant["score"] -= min(dist, 1.0) * 0.03
-            variants.append(variant)
-        return variants
 
     @staticmethod
     def _candidate_key(candidate: Dict[str, Any]) -> tuple:
@@ -410,6 +508,8 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
         evaluations = sdk.evaluate_pose_candidates(pregrasp_poses, kind="pregrasp")
         for candidate, evaluation in zip(candidates, evaluations):
             candidate["planner_status"] = evaluation.get("status", "Unknown")
+            if evaluation.get("planner_debug") is not None:
+                candidate["planner_debug"] = evaluation.get("planner_debug")
             if evaluation.get("waypoint_count") is not None:
                 candidate["planner_waypoint_count"] = int(evaluation["waypoint_count"])
 
@@ -422,7 +522,20 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
             else:
                 score -= 0.15
             candidate["score"] = score
-        return sorted(candidates, key=lambda item: item.get("score", 0.0), reverse=True)
+        ranked = sorted(candidates, key=lambda item: item.get("score", 0.0), reverse=True)
+        self.last_grasp_diagnostics = [
+            {
+                "variant_label": str(candidate.get("variant_label", "")),
+                "score": float(candidate.get("score", 0.0)),
+                "planner_status": str(candidate.get("planner_status", "Unknown")),
+                "planner_waypoint_count": candidate.get("planner_waypoint_count"),
+                "pose_xyz": [float(v) for v in list(candidate.get("pose") or [])[:3]],
+                "pregrasp_xyz": [float(v) for v in list(candidate.get("pregrasp_pose") or [])[:3]],
+                "planner_debug": candidate.get("planner_debug"),
+            }
+            for candidate in ranked[:12]
+        ]
+        return ranked
 
     def _synthesize_grasp_candidates_from_pose(
         self,
@@ -432,39 +545,24 @@ class RoboTwinDepthPoseProvider(PerceptionAdapter):
         if object_pose is None or len(object_pose) < 3:
             return []
         orientation = [0.9949492141138409, 0.0001428575322812901, 0.10037948350189996, 1.4760360441018511e-05]
+        arm = "left"
         if context is not None and hasattr(context, "world_state"):
             eef_pose = getattr(context.world_state.robot, "eef_pose", None)
             if eef_pose and len(eef_pose) >= 7:
                 orientation = [float(v) for v in eef_pose[3:7]]
-
-        obj = np.asarray(object_pose[:3], dtype=np.float64)
-        base_height = float(obj[2]) + 0.085
-        pre_height = base_height + 0.055
-        offsets = [
-            ("synth_center", np.asarray([0.0, 0.0, 0.0])),
-            ("synth_back", np.asarray([-0.02, 0.0, 0.0])),
-            ("synth_left", np.asarray([0.0, -0.02, 0.0])),
-            ("synth_right", np.asarray([0.0, 0.02, 0.0])),
-            ("synth_high", np.asarray([0.0, 0.0, 0.02])),
-        ]
-        candidates: List[Dict[str, Any]] = []
-        for rank, (label, offset) in enumerate(offsets):
-            grasp_xyz = obj + offset
-            pregrasp_xyz = grasp_xyz + np.asarray([-0.09, 0.0, 0.05])
-            pose = [float(grasp_xyz[0]), float(grasp_xyz[1]), float(base_height + offset[2]), *orientation]
-            pregrasp = [float(pregrasp_xyz[0]), float(pregrasp_xyz[1]), float(pre_height + offset[2]), *orientation]
-            candidates.append(
-                {
-                    "pose": pose,
-                    "pregrasp_pose": pregrasp,
-                    "arm": "left",
-                    "score": 0.72 - rank * 0.03,
-                    "variant_label": label,
-                    "rank": rank,
-                    "source_index": -1,
-                }
-            )
-        return candidates
+        if context is not None:
+            adapters = getattr(context, "adapters", {}) or {}
+            sdk = adapters.get("sdk")
+            if sdk is not None and hasattr(sdk, "_active_arm"):
+                try:
+                    arm = str(sdk._active_arm())
+                except Exception:
+                    arm = "left"
+        return build_synthesized_grasp_candidates(
+            object_pose=object_pose,
+            arm=arm,
+            orientation=quat_normalize(orientation),
+        )
 
     def export_component_diagnostics(self, observation: PerceptionObservation) -> Dict[str, Any]:
         depth = observation.depth

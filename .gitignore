@@ -16,7 +16,13 @@ third_party/RoboTwin/assets/background_texture/
 third_party/RoboTwin/assets/embodiments/
 third_party/RoboTwin/assets/objects/
 third_party/RoboTwin/envs/curobo/
+third_party/_external/
+third_party/Grounded-SAM-2/
+third_party/FoundationPose/
+third_party/contact_graspnet/
+third_party/graspnet-baseline/
+third_party/GraspGen/
 
 references/rl_vla/carm_ros_deploy/src/realsense-ros/realsense2_description/meshes/
-
+CODEX_AUTH_SWITCH_REPRO_GUIDE.md
 .DS_Store

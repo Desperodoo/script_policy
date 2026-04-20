@@ -16,6 +16,7 @@ robotwin:
   object_attr: cup
   target_attr: coaster
   target_functional_point_id: 0
+  object_functional_point_id: 0
   pregrasp_distance: 0.1
   place_approach_distance: 0.05
   place_release_distance: 0.02

@@ -16,7 +16,7 @@ This skill is for `script_policy` repository work that touches RoboTwin setup or
 
 ## Workflow
 
-1. Read `.codex/WORKSPACE.md`, `.codex/MEMORY.md`, and `.codex/ROBOTWIN_PLAN.md`.
+1. Read `.codex/PROMPT_RULES.md`, `.codex/WORKSPACE.md`, `.codex/MEMORY.md`, and `.codex/ROBOTWIN_PLAN.md`.
 2. Read `.codex/OPEN_SOURCE_SCRIPT_POLICY_INDEX.md` before implementing a feature from scratch.
 3. Inspect `third_party/RoboTwin` before making assumptions about APIs or install steps.
 4. Prefer adapting RoboTwin into `script_runtime/adapters/robotwin_bridge.py` instead of changing runtime core abstractions.
@@ -27,6 +27,11 @@ This skill is for `script_policy` repository work that touches RoboTwin setup or
    - robot status
    - task success
 6. Keep ManiSkill code only as reference for bridge structure and validation patterns.
+7. For complex task failures, do not skip the grasp semantics stage:
+   - candidate affordance
+   - task compatibility
+   - semantic grasp validation
+8. When a real rollout is available, review visual artifacts before concluding which subsystem is broken.
 
 ## Implementation guidance
 
@@ -35,10 +40,12 @@ This skill is for `script_policy` repository work that touches RoboTwin setup or
 - If RoboTwin exposes richer semantics, prefer extending blackboard fields in a backward-compatible way.
 - Preserve trace output and failure code behavior.
 - For any sub-feature such as behavior tree, planning, grasp proposal, or grounding, check the open-source index first and prefer reuse/reference over reimplementation.
+- If a failure might be caused by grasping the wrong object part, do not optimize place/release first. Add or improve affordance semantics and semantic grasp checks before tuning downstream modules.
 
 ## Validation guidance
 
 - First validate environment import and one official task.
 - Then validate a minimal runtime session with stubbed or direct bridge calls.
 - Then add a real rollout runner.
-- Keep outputs inspectable with JSON, trace, and if possible rendered media.
+- Keep outputs inspectable with JSON, trace, and rendered media.
+- For complex RoboTwin tasks, the validation loop is incomplete unless at least one real-view artifact was reviewed.

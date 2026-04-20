@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from script_runtime.core.registry import SkillRegistry
-from script_runtime.skills.checks import CheckContact, CheckGrasp, CheckSceneReady, CheckTaskSuccess, WaitForObjectStable
-from script_runtime.skills.gripper import ExecuteGraspPhase, GuardedClose, OpenGripper, ResetGripper
+from script_runtime.skills.checks import (
+    CheckContact,
+    CheckGrasp,
+    CheckSceneReady,
+    CheckTaskSuccess,
+    ReselectGraspAfterPregrasp,
+    WaitForObjectStable,
+)
+from script_runtime.skills.gripper import ExecuteGraspPhase, GuardedClose, OpenGripper, PrepareGripperForGrasp, ResetGripper
 from script_runtime.skills.learned import ScorePlaceCandidates, SuccessRiskCheck
 from script_runtime.skills.motion import (
     ApproachActiveGrasp,
@@ -43,6 +50,7 @@ def build_default_skill_registry() -> SkillRegistry:
             Retreat(),
             ResetArm(),
             OpenGripper(),
+            PrepareGripperForGrasp(),
             GuardedClose(),
             ExecuteGraspPhase(),
             ResetGripper(),
@@ -51,6 +59,7 @@ def build_default_skill_registry() -> SkillRegistry:
             CheckGrasp(),
             CheckContact(),
             CheckTaskSuccess(),
+            ReselectGraspAfterPregrasp(),
             GetObjectPose(),
             GetGraspCandidates(),
             ReacquirePerception(),

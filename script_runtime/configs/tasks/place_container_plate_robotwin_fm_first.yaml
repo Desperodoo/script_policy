@@ -1,0 +1,84 @@
+runtime:
+  task_id: ""
+  trace_path: script_runtime/artifacts/robotwin_place_container_plate_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_place_container_plate
+
+perception_stack:
+  type: fm_first
+  enabled:
+    oracle_pose: true
+    oracle_grasp: true
+    robotwin_depth_pose: true
+    robotwin_depth_grasp: true
+  grounded_sam2:
+    model_id: IDEA-Research/grounding-dino-tiny
+    box_threshold: 0.35
+    text_threshold: 0.25
+    max_detections: 8
+    device: cuda
+  foundationpose:
+    python_bin: /home/amax/miniforge-pypy3/envs/script_policy_foundationpose/bin/python
+    timeout_s: 180
+  contact_graspnet:
+    python_bin: /home/amax/miniforge-pypy3/envs/m2diffuser/bin/python
+    timeout_s: 180
+    max_candidates: 12
+  repos:
+    grounded_sam2: third_party/Grounded-SAM-2
+    foundationpose: third_party/FoundationPose
+    contact_graspnet: third_party/contact_graspnet
+    graspnet_baseline: third_party/graspnet-baseline
+    graspgen: third_party/GraspGen
+
+robotwin:
+  task_name: place_container_plate
+  task_config: demo_clean
+  seed: 1
+  episode_index: 0
+  render_freq: 0
+  use_seed: true
+  collect_data: false
+  save_data: false
+  eval_mode: true
+  object_attr: container
+  target_attr: plate
+  target_functional_point_id: 0
+  object_functional_point_id: 0
+  pregrasp_distance: 0.1
+  place_approach_distance: 0.12
+  place_release_distance: 0.03
+  retreat_distance: 0.08
+  camera_shader_dir: default
+  capture_video: true
+  capture_every_n_steps: 3
+  episode_name: place_container_plate
+
+execution:
+  active_source: policy
+  control_owner: script_runtime
+
+task_goal:
+  task_name: place_container_plate
+  target_object: container
+  target_surface: plate
+
+grasp_semantics:
+  required: true
+  required_affordances: [rim_grasp, body_support]
+  visual_review_required: true
+
+scene:
+  workspace_ready: true
+  tracking_lost: false
+  depth_anomaly: false
+  detection_confidence: 1.0
+  calibration_version: robotwin
+
+poses:
+  home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+gripper:
+  open_width: 1.0
+  close_width: 0.0
+  tau: 1.0

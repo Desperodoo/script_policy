@@ -107,9 +107,630 @@
   - 当前最自然的下一步不是扩新任务，而是：
     - 围绕 `place_container_plate` 做 planner-friendly grasp / pregrasp 生成
     - 同时把非 oracle perception 从 `place_empty_cup` 扩到更复杂物体
+- 2026-04-16 继续推进后的新增记忆：
+  - 已为 `RoboTwinDepthPoseProvider` 增加 orientation-aware candidate variants
+  - 已新增 left/right arm-aware pregrasp/backoff family
+  - 已为 `PlaceRelease` 增加更温和的 release fallback 候选
+  - 已为 `RoboTwinBridge.evaluate_pose_candidates()` 增加更鲁棒的 status 规范化逻辑
+  - 已识别出 RoboTwin batch planner 有时会返回固定长度的 uniform status 列表
+  - 规范化后，trace 里一部分原来的 `Unknown` 已能显示成真实 `Failure`
+  - planner feedback 还不是完全闭环，但至少不再被 `Unknown` 大面积掩盖
+  - 新一轮 `place_container_plate` seed 对比：
+    - `pick_place-9a52ac18`：`seed=1` 成功，右臂
+    - `pick_place-1ec38c40`：`seed=2` 失败，左臂，但已推进到 `PlaceApproach`
+    - `pick_place-db91c319`：`seed=2` 失败，左臂，但已进一步推进到 `PlaceRelease`
+    - `pick_place-48bb25e0`：`seed=2` 失败，左臂，trace 中 pregrasp 候选已显示真实 `planner_status=Failure`
+    - `pick_place-ee098b8a`：`seed=3` 成功，右臂
+  - 相比此前左臂 case 容易卡在 `GoPregrasp`
+  - 当前左臂 case 已能稳定完成 `GoPregrasp -> ExecuteGraspPhase -> Lift`
+  - 这证明 arm-aware pregrasp family 是有效的
+  - 当前新的主要瓶颈已从左臂 `GoPregrasp` 转移到放置后段：
+    - 先是 `PlaceApproach`
+    - 最新部分 run 中已经推进到 `PlaceRelease`
+  - 已开始把 grasp/pregrasp candidate family 从 `perception_adapter.py` 上提到 `script_runtime/planning/candidate_families.py`
+  - 这意味着“候选族生成”已经开始从 case patch 转向共享 planning wheel
+- 2026-04-16 本轮继续推进后的新增记忆：
+  - 已为 `PlaceApproach / PlaceRelease` 增加 planner-aware candidate ranking
+  - ranking 信息会进入 skill payload / trace：
+    - `planner_status`
+    - `planner_waypoint_count`
+    - `candidate_ranking`
+  - 已为 `RetryWithNextCandidate` 增加 planner-aware skipping
+    - 会跳过明确 `planner_status=Failure/Fail` 的候选
+    - 当剩余候选全部 planner-infeasible 时，直接返回：
+      - `No planner-feasible next candidate available`
+  - 对 `place_container_plate seed=2` 的最新复验：
+    - `pick_place-18010c59`：旧恢复逻辑下仍会尝试多组已知 `planner_status=Failure` 的 pregrasp
+    - `pick_place-2aaea80d`：新恢复逻辑下会尽早收敛成 `No planner-feasible next candidate available`
+  - 这说明当前最该推进的不是继续增加重试次数，而是：
+    - 生成新的 left-arm planner-feasible grasp/pregrasp family
+    - 或让 perception / candidate generator 产出更不同模态的候选
+  - 随后又补了一轮 object-centric / current-EEF-aware grasp family：
+    - `object_current_lane`
+    - `object_inside_sweep`
+    - `object_arc_entry`
+  - 最新两轮 `seed=2` 复验：
+    - `pick_place-8e7bd298`
+    - `pick_place-ca9e189a`
+  - 结论：
+    - 这些新 family 已经进入 top-ranked 前列，不再完全被旧簇压住
+    - 但它们仍全部返回 `planner_status=Failure`
+    - 说明当前已经不是“候选排序问题”，而是“还缺一类真正不同模态的 left-arm grasp/pregrasp pose family”
+  - 之后又新增了一轮 left-arm coarse orientation bank：
+    - `left_yaw_pos_45 / left_yaw_neg_45`
+    - `left_pitch_pos_30 / left_pitch_neg_30`
+    - `left_roll_in_35 / left_roll_out_35`
+    - 以及若干 yaw+pitch 组合
+  - 最新复验：
+    - `pick_place-61ff6b89`
+  - 结论进一步收紧：
+    - coarse orientation bank 已经真实生成并参与排序
+    - 但当前仍全部 `planner_status=Failure`
+    - 说明瓶颈开始更像 left-arm planner / robot geometry 与候选空间的根本错位，而不再只是“缺少粗粒度姿态”
+  - 2026-04-16 随后完成了一轮“左臂系统性约束”专项分析：
+    - 文档：
+      - `.codex/LEFT_ARM_PLANNER_GEOMETRY_ANALYSIS_2026-04-16.md`
+  - 核心结论：
+    - 左臂 planner 本身并非普遍不可达
+    - 对 RoboTwin 原生 contact point，左臂存在大量可规划姿态
+    - 但默认 `choose_grasp_pose()` 在 `seed=2` 下选中了一个 quaternion 偏好更优、却实际 `plan_path=Fail` 的 contact point
+    - 所以当前主瓶颈是：
+      - `grasp selection policy` 与 `planner feasibility` 脱节
+    - 而不是：
+      - `left arm planner` 本身不行
 - 2026-04-15 已再次清理 `script_policy` / RoboTwin 残留 GPU 进程
   - 当前显存主要占用来自其他用户 / 其他项目训练任务，不是本仓库残留
   - 之前遗留的主要来源是手工启动的 RoboTwin 探针脚本与 `robotwin_pick_place` / pose diagnostics 调试命令
+- 2026-04-18 最新 FM-first grasp stack 记忆：
+  - `GroundedSAM2Grounder` 已不再只是“框级检测”
+  - 当前新增了：
+    - 任务语义 + 几何 rerank
+    - `target_surface` 避让框
+    - `surface_overlap_ratio` 惩罚
+    - bbox 内的 depth-refined 前景 mask
+  - 最新 grounding 样例：
+    - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v4/`
+  - 当前关键结论：
+    - 右侧真实 container 候选已成为 top-1
+    - 中间 plate 大平面候选已被显式压低
+    - selected grounding 已可导出 `mask_source=depth_refined_component`
+  - `FoundationPose` 独立导出验证产物：
+    - `script_runtime/artifacts/robotwin_place_container_plate/foundationpose_seed1_v2/`
+    - 当前 blockers 仍为：
+      - `weights_missing`
+      - `missing_dependency_pytorch3d`
+      - `missing_dependency_nvdiffrast`
+  - `Contact-GraspNet` 独立导出验证产物：
+    - `script_runtime/artifacts/robotwin_place_container_plate/contact_graspnet_seed1_v2/`
+    - 当前 blockers 仍为：
+      - `checkpoints_missing`
+      - `missing_dependency_tensorflow`
+- 2026-04-19 最新 FM-first grasp stack 记忆：
+  - `GroundedSAM2Grounder` 已继续推进到实例级 mask rerank：
+    - `surface_overlap_ratio` 已优先使用 mask overlap
+    - diagnostics 中新增 `mask_outline_xy`
+    - 最新样例：
+      - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v6/`
+    - 当前 overlay 里已经能直接看到 container / plate 的实例轮廓，而不再只有 bbox
+  - `Contact-GraspNet` 已从 export-only 推进到真实独立运行：
+    - 环境：
+      - `/home/amax/miniforge-pypy3/envs/m2diffuser`
+    - 成功产物：
+      - `script_runtime/artifacts/cgn_m2diffuser_run/cgn_headless_m2diffuser_v6/contact_graspnet_summary.json`
+      - `script_runtime/artifacts/cgn_m2diffuser_run/cgn_headless_m2diffuser_v6/contact_graspnet_overlay.png`
+    - 当前结果：
+      - `grasp_total=79`
+  - `FoundationPose` 当前已从“资源没准备好”收敛为明确工具链问题：
+    - `pytorch3d` 已在 `script_policy_foundationpose` 环境装好
+    - `nvdiffrast` 仍卡在 CUDA dev headers / toolchain
+    - 已确认：
+      - 默认系统 CUDA `12.4` 与 PyTorch `cu118` 不匹配
+      - 切到 `11.8` 编译器后已进入真实构建，但又缺 `cusparse.h`
+- 2026-04-16 本轮最新进展：
+  - 已定位 `place_container_plate seed=2` 里“单独 probe 可行、完整 runtime 退化”的真实触发器：
+    - `head_camera` snapshot / depth pose 访问后，RoboTwin backend 的第一次 `get_grasp_candidates()` 会偶发退化成全 `Failure`
+    - 但紧接着再次调用时，可恢复到 `contact_0 / Success`
+  - 为此已给 `RoboTwinDepthPoseProvider` 增加稳健 backend candidate 选择逻辑：
+    - 先读 backend
+    - 若无 `planner_status=Success`，自动再取一次 backend
+    - 同时允许回退到 blackboard / world_state 中已缓存的 candidate 集
+  - 新增单测：
+    - `test_robotwin_depth_provider_retries_backend_before_augmenting`
+  - 最新验收 run：
+    - `script_runtime/artifacts/robotwin_place_container_plate/pick_place-49074511/`
+- 2026-04-20 RoboTwin 多任务批量验证本轮新增关键记忆：
+  - 已新增多任务 batch runner：
+    - `script_runtime/runners/evaluate_robotwin_multitask_suite.py`
+  - 已新增默认 suite：
+    - `script_runtime/configs/robotwin_multitask_place_suite.yaml`
+  - 已新增三份 config-first place 任务配置：
+    - `script_runtime/configs/tasks/place_phone_stand_robotwin.yaml`
+    - `script_runtime/configs/tasks/place_shoe_robotwin.yaml`
+    - `script_runtime/configs/tasks/place_object_stand_robotwin.yaml`
+  - 已明确一个重要契约细节：
+    - `place_object_stand` 的真实 RoboTwin target actor 是 `displaystand`
+    - 不是猜测式的 `stand`
+    - 这轮已经按 RoboTwin 源码对齐配置
+  - 已新增多任务 suite 单测：
+    - `script_runtime/tests/test_robotwin_multitask_suite.py`
+    - 当前通过：`4 passed`
+  - 本轮最重要的平台结论不是任务失败本身，而是：
+    - 非隔离批跑会出现 RoboTwin / SAPIEN / CUDA 进程内状态污染
+    - 具体表现为后半段任务批量报：
+      - `Failed to find a supported physical device "cuda:1"`
+    - 若直接用非隔离结果做聚类，会把真实任务失败误污染成 `setup_or_contract`
+  - 因此 runner 现已新增：
+    - `--isolated`
+    - 每个 run 在新的 Python 子进程中执行
+    - 用来隔离 RoboTwin / CUDA 状态，避免跨任务串扰
+  - 第一轮 baseline 6 任务 `seeds 1,2,3` 的可信结果现在以 isolated 版本为准：
+    - artifact:
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_baseline_isolated/`
+    - summary:
+      - `robotwin_multitask_place_baseline_isolated_summary.md`
+    - 结果：
+      - `18` runs
+      - `17` env success
+      - 只有 `1` 条真实失败
+  - 当前真实多任务 cluster 分布：
+    - `success = 17`
+    - `lift_persistence = 1`
+  - 各任务当前状态：
+    - `place_empty_cup`: `3/3 success`
+    - `place_mouse_pad`: `3/3 success`
+    - `place_phone_stand`: `3/3 success`
+    - `place_shoe`: `3/3 success`
+    - `place_object_stand`: `3/3 success`
+    - `place_container_plate`: `2/3 success`
+      - 唯一失败：
+        - `seed=2`
+        - `failure_stage=lift_persistence`
+  - 因此本轮新的策略判断是：
+    - 当前 place-only `PickPlaceTask + RoboTwinBridge + runtime` 基线比预期更稳
+    - 当前没有出现 2-3 个高频失败阶段
+    - 不应为了“凑数量”强行派生多个 `*_fm_first.yaml`
+    - 下一轮值得跟进的 FM-first 候选只有一个：
+      - `place_container_plate`
+      - 聚焦 `seed=2`
+      - 关注 `lift_persistence`
+  - 非隔离 baseline 结果本身也有价值：
+    - 它暴露了 benchmark runner 的系统性风险
+    - 后续任何多任务 benchmark 默认都应优先走 isolated 子进程模式
+    - 随后又修复了 `refresh_world()` 会覆盖 recovery 已选 active grasp 的问题
+    - 新验收 run：
+      - `script_runtime/artifacts/robotwin_place_container_plate/pick_place-f3803fae/`
+  - 该 run 的关键信号：
+    - `GetGraspCandidates` 已稳定输出 `candidate_source=oracle_feasibility_first`
+    - top candidate 为 `contact_0 / planner_status=Success`
+    - `GoPregrasp` 已成功跨过旧瓶颈
+    - `RetryWithNextCandidate` 现在切换到 `contact_1` 后，后续 `ExecuteGraspPhase` 会真正执行新的 target pose，不再被 `refresh_world()` 偷偷改回去
+    - 任务树已能推进到：
+      - `ExecuteGraspPhase`
+      - `Lift`
+      - `PlaceApproach`
+      - `PlaceRelease`
+      - `OpenGripper`
+      - `Retreat`
+      - `GoHome`
+      - `CheckTaskSuccess`
+  - 当前新的主问题已经收敛为两段：
+    - grasp execution 本身还不够稳，但 recovery 切到 `contact_1` 后现在能稳定真正执行新候选，并在最新 run 中一次 retry 后抓住
+    - 放置后虽然 runtime 能 nominal 走完整棵树，但 `env.check_success()` 仍返回 `success=false`
+  - 这说明：
+    - “左臂 feasibility-first grasp selection” 这一阶段性目标已经基本打通
+    - 下一步工程焦点应从“保住可行 pregrasp”切到：
+      - `ExecuteGraspPhase` 的 grasp closure / contact 稳定性
+      - `PlaceRelease / release geometry / retreat` 对环境成功判定的对齐
+- 2026-04-18 新增重要纠偏记忆：
+  - 用户关于“旧版 v2/v3 看起来并没有真正张开夹爪再抓”的怀疑是对的
+  - 旧版 `PickPlaceTask` 确实缺少抓取前显式 open 步骤
+  - 这意味着：
+    - 旧版 `post_pregrasp_reselect_seed2_v2/v3` 虽然出现过短暂 `ExecuteGraspPhase SUCCESS`
+    - 但不应再被表述成“已经稳定抓住”
+  - 已新增：
+    - `PrepareGripperForGrasp`
+    - 更保守的 `RoboTwinBridge.get_grasp_diagnostics()`
+    - 更保守的 `RoboTwinBridge.is_grasped()`
+  - 第一轮新复验：
+    - `pregrasp_open_strict_grasp_seed2_v1`
+    - 暴露 prepare 阶段会触发 refresh + planner 重评，原先 `2s` timeout 过短，导致假失败
+  - timeout 修正后：
+    - `pregrasp_open_strict_grasp_seed2_v2`
+    - 已真实进入：
+      - `PrepareGripperForGrasp -> GoPregrasp -> ReselectGraspAfterPregrasp -> ExecuteGraspPhase -> Lift`
+    - 期间有两次真实抓住事件：
+      - 一次 `contact_point_count=4`
+      - 一次 `contact_point_count=11`
+    - 但两次都在 `Lift` 后的 `CheckGrasp` 失败
+  - 当前主瓶颈已明确收敛为：
+    - `grasp persistence through lift`
+    - 而不是“有没有发生抓取动作”
+- 2026-04-18 新增战略记忆：
+  - 当前已正式承认：
+    - 之前在 heuristic-first grasp family 这条线上投入过深
+    - 这是当前推进变慢的主要战略原因之一
+  - 当前默认路线已切换为：
+    - `FM-first grasp stack + runtime execution`
+  - 已新增代码主入口：
+    - `script_runtime/adapters/fm_grasp_stack.py`
+  - 已落地的统一接口：
+    - `TargetGrounder`
+    - `ObjectPoseEstimator`
+    - `GraspProposalBackend`
+    - `TaskAwareGraspReranker`
+    - `FMFirstGraspStackAdapter`
+  - 当前仓库已具备多后端横向试验骨架，而不是只绑定单 provider
+  - 当前已接入的 scaffold backend：
+    - `GroundedSAM2Grounder`
+    - `FoundationPoseEstimator`
+    - `ContactGraspNetBackend`
+    - `GraspNetBaselineBackend`
+    - `GraspGenBackend`
+  - 当前可运行 fallback backend：
+    - `task_goal_prompt`
+    - `robotwin_depth`
+    - `oracle_pose`
+    - `oracle_feasibility`
+    - `depth_synthesized`
+  - `session.py` 已支持通过配置 `perception_stack.type=fm_first` 切换到新路线
+  - 已新增轻量 comparison runner：
+    - `script_runtime.runners.inspect_fm_grasp_stack`
+  - 首轮旧真实 comparison 样例：
+    - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v1/`
+  - 2026-04-18 晚间最新真实 comparison 样例：
+    - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v2/`
+  - 当前真实 comparison 结果已更新为：
+    - `Grounded-SAM-2`
+      - 已不再是纯 scaffold
+      - 当前通过 `transformers + GroundingDINO HF` 跑出真实 bbox
+      - 已导出：
+        - `fm_stack_compare_seed1_v2_fm_grasp_inspect_grounding_overlay.png`
+    - `FoundationPose`
+      - repo 已存在
+      - 当前为 `weights_missing`
+    - `Contact-GraspNet`
+      - repo 已存在
+      - 当前为 `checkpoints_missing`
+      - 且环境缺 `tensorflow`
+    - `GraspNet Baseline / GraspGen`
+      - 当前仍是 repo 缺失
+    - 实际运行链路更新为：
+      - grounding：
+        - `grounded_sam2`
+      - pose：
+        - `robotwin_depth`
+      - grasp：
+        - `oracle_feasibility`
+        - `depth_synthesized`
+  - 2026-04-18 更晚的新增记忆：
+    - `GroundedSAM2Grounder` 已加入任务语义 + 深度几何二次筛选
+    - 最新样例：
+      - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v3/`
+    - 当前已确认：
+      - 中间 plate 候选在 `upright_container` profile 下被显著打低
+      - 右侧真实 container 候选排在第一位
+    - 当前 grounding diagnostics 里已经有：
+      - `geometry_score`
+      - `overall_score`
+      - `world_extent_xyz_m`
+      - `world_slenderness`
+      - `world_flatness`
+  - 已新增独立 backend validation runner：
+    - `script_runtime.runners.inspect_foundationpose_backend`
+    - `script_runtime.runners.inspect_contact_graspnet_backend`
+  - 已导出第一批 backend 原生输入包：
+    - `script_runtime/artifacts/robotwin_place_container_plate/foundationpose_seed1_v1/`
+    - `script_runtime/artifacts/robotwin_place_container_plate/contact_graspnet_seed1_v1/`
+  - 当前精确 blockers：
+    - `FoundationPose`
+      - `weights_missing`
+      - `missing_dependency_pytorch3d`
+      - `missing_dependency_nvdiffrast`
+    - `Contact-GraspNet`
+      - `checkpoints_missing`
+      - `missing_dependency_tensorflow`
+  - 后续上游复杂任务默认不再“只试一个方案”，而是：
+    - 先接多个后端
+    - 先做 diagnostics / comparison
+    - 再决定最终优先级
+- 2026-04-18 当前新增记忆：
+  - `RoboTwinDepthPoseProvider` 已进一步升级为：
+    - 多次 backend candidate 读取
+    - 合并
+    - 按 `contact_point_id` family 去重
+    - planner-feasible-first 排序
+  - 相关回归当前为：
+    - `33 passed`
+  - 最新真实验证：
+    - `script_runtime/artifacts/robotwin_place_container_plate/semantic_gate_seed2_merged/`
+    - `script_runtime/artifacts/robotwin_place_container_plate/semantic_gate_seed2_merged_v2/`
+  - 新证据需要牢记：
+    - `seed=2` 的第一轮 `GetGraspCandidates` 已不再是旧版的单候选
+    - `semantic_gate_seed2_merged_v2` 的首轮候选已稳定为：
+      - `contact_0 / Success`
+      - `contact_1 / Failure`
+    - 但 runtime 在第一次抓取失败后的 refresh / retry 中，仍会切到 `contact_1 / Success`
+  - 这意味着当前主瓶颈已经从“candidate completeness 不够”进一步收敛为：
+    - 初始状态下的 planner 反馈
+    - 与失败后 state refresh 触发的 planner 反馈
+    - 之间存在明显不一致
+  - 更贴切的下一步应理解成：
+    - state-dependent pregrasp family / replanning
+    - 而不是继续只证明“系统能不能看到第二个候选”
+  - 同时，这轮并不是只有 trace 更好看：
+    - `semantic_gate_seed2_merged_v2` 的 `CheckTaskSuccess` 中
+    - object-to-target `xy_norm` 已从约 `0.298` 改善到约 `0.183`
+    - 说明 candidate 合并与 family 去重已经真实改善了后段放置几何
+- 2026-04-18 当晚进一步需要牢记的新证据：
+  - 已把 `refresh_reason + grasp_candidate_refresh diagnostic` 接入 runtime
+  - 并且不再只停留在 trace 内存里：
+    - `robotwin_bridge.export_episode_artifacts()` 现会导出
+      - `*_grasp_candidate_refresh_history.json`
+  - 关键 run：
+    - `script_runtime/artifacts/robotwin_place_container_plate/semantic_refresh_diag_seed2_v2/`
+  - 这轮已经明确证明：
+    - 初始 `GetGraspCandidates` 时
+      - `contact_1 = Failure`
+    - 第一次 `GoPregrasp` 成功后的 `post_GoPregrasp` refresh 中
+      - `contact_1` 会从 `Failure -> Success`
+  - 因此新的核心判断应更新为：
+    - 当前真正触发 candidate feasibility flip 的关键节点是
+      - pregrasp motion
+    - 而不是：
+      - recovery skill 本身
+  - 这会直接改变下一步策略：
+    - 不应只围绕 `RetryWithNextCandidate` 打补丁
+    - 更自然的下一步应该是：
+      - `GoPregrasp` 后做一次 post-pregrasp re-ranking / reselection
+      - 或显式建模“靠近目标后重评 grasp candidate”
+  - 还需要保留一个现实判断：
+    - 同 seed 的不同 run 里，这个翻转是否出现、何时出现，仍带随机性
+    - 所以后续不能只盯单个 run，要用 repeated seed 验证这条模式是否稳定
+- 2026-04-18 这一条路线已继续落地：
+  - 已新增 `ReselectGraspAfterPregrasp`
+  - 并插到 `GoPregrasp` 与 `ExecuteGraspPhase` 之间
+  - 当前保守规则：
+    - 若 `post_GoPregrasp` refresh 中出现“非当前候选 Failure -> Success”
+    - 则主动把 active candidate 切过去
+  - 同时已修 `RetryWithNextCandidate` 的关键 bug：
+    - 以前它按 candidates 列表第一个来移除“当前候选”
+    - 现在改为按 `active_grasp_candidate` 精确移除
+  - 关键 run：
+    - `script_runtime/artifacts/robotwin_place_container_plate/post_pregrasp_reselect_seed2_v2/`
+  - 当前最重要的新结论：
+    - `post-pregrasp reselection` 不是只在 trace 里发生
+    - 它已经真实改变了执行序列：
+      - 先 `0 -> 1`
+      - `1` 失败后正确 fallback 到 `0`
+      - 随后又切回 `1`
+      - 最终 `ExecuteGraspPhase / CheckGrasp / Lift` 成功
+  - 这说明：
+    - grasp candidate selection / reselection 层已经比之前健康很多
+    - 当前更值得怀疑的下一前沿是：
+      - grasp persistence / grasp closure 稳定性
+      - 以及后段 place success
+  - 还要记住一个随机性事实：
+    - `post_pregrasp_reselect_seed2_v3` 中第一次 `contact_1` 已能直接抓成
+    - 但同轮后续又暴露 `SafeRetreat` / motion 随机失败
+    - 所以后续结论仍要以 repeated runs 为准，不能只看单次 run
+- 2026-04-16 随后新增：
+  - 已把 release 相关状态采样正式注入 trace
+    - `PlaceRelease.release_state_before / release_state_after`
+    - `OpenGripper.state_before / state_after`
+    - `Retreat.state_before / state_after`
+    - `CheckTaskSuccess.before_settle_snapshot / after_settle_snapshot`
+  - 最新诊断 run：
+    - `script_runtime/artifacts/robotwin_place_container_plate/release_diag_seed2/`
+  - 从这份 trace 里目前能比较确定地看到：
+    - `PlaceRelease` 前 object center 到 target center 的 `xy_norm` 已约 `0.184`
+    - `OpenGripper` 后约 `0.182`
+    - `Retreat` 后一度约 `0.177`
+    - `CheckTaskSuccess` settle 前后又回到约 `0.185`
+  - 当前最可靠的解释因此是：
+    - release / open / settle 会产生小幅漂移
+    - 但主要误差在 `PlaceRelease` 前就已经存在
+    - 下一步应该继续打 release 前的 center-aligned approach / release pose，而不是优先怀疑 settle
+- 2026-04-17 随后新增：
+  - 已把 `place_container_plate` 的放置候选评分升级为“保守运输预测”
+    - 新信号包括：
+  - 但用户随后基于真实视角 `adaptive_closed_loop_container_realview_contact_sheet.png` 指出了更关键的问题：
+    - 当前复杂任务的主瓶颈很可能不是“放得不准”
+    - 而是根本没有以任务兼容的方式抓住目标部位
+  - 这暴露出两层需要长期记住的工程问题：
+    - 当前 `CheckGrasp` / `is_grasped` 风格判断会漏掉“抓住了但抓错了”的情况
+    - 自主迭代逻辑此前过度依赖 trace scalar，没有把真实视角图像当成一等证据
+  - 2026-04-17 起，仓库内默认新增三条基础约束：
+    - 先补 grasp candidate affordance 语义
+    - 先补 `CheckGrasp` 的语义验证
+    - 每轮真实任务必须看图，若图像与标量冲突，以图像问题优先
+  - 同日已把上述约束真正落成仓库脚手架：
+    - `.codex/PROMPT_RULES.md`
+    - `.codex/TASK_PROMPT_TEMPLATE.md`
+    - `.codex/skills/grasp-debug-loop/SKILL.md`
+    - `script_runtime/planning/grasp_semantics.py`
+  - 并完成一轮真实 RoboTwin 回归：
+    - `script_runtime/artifacts/robotwin_place_empty_cup/grasp_semantics_scaffold_smoke/`
+  - 该 run 虽然最终失败在 `PlaceApproach`
+  - 但新的 `GetGraspCandidates.affordance` 与 `CheckGrasp.grasp_semantic_report` 已真实进入 trace
+  - 说明当前“抓取语义层”已经不是纯文档约束，而是实际 runtime 的一部分
+  - 随后又把这层语义继续推进到 `place_container_plate`
+    - 配置已启用 `grasp_semantics.required=true`
+    - `robotwin_bridge` 现会利用 RoboTwin object metadata 自动补：
+      - `object_model_name`
+      - `object_model_id`
+      - `contact_group_index`
+      - `semantic_reference_contact_id`
+      - `task_compatibility`
+    - 并把语义真正接到控制流：
+      - `GetGraspCandidates` 按 `preferred -> compatible -> unknown -> incompatible` 排序
+      - `RetryWithNextCandidate` 会跳过 `incompatible` 候选
+  - 真实验证结果：
+    - `semantic_gate_seed2`
+      - `021_cup/base7`
+      - 左臂只暴露 `contact_ids=[0,1]`
+      - RoboTwin 官方参考左臂 contact `2` 在该实例不可用
+      - runtime 会把实际抓法标为：
+        - `task_compatibility=compatible`
+        - `reference_contact_unavailable_in_current_instance`
+      - 这条 run 仍环境失败，但已经把“只是兼容退化，不是命中参考 family”说清楚
+    - `semantic_gate_seed3`
+      - `002_bowl/base1`
+      - 右臂 contact group `[0,1]` 被标成 `preferred`
+      - 对侧 group `[2,3]` 被标成 `incompatible`
+      - `CheckGrasp.selected_contact_in_preferred_family=true`
+      - 真实 run 环境成功
+    - `semantic_gate_seed3_ranked`
+      - 在把语义接入排序与恢复后再次复验
+      - 真实 run 仍环境成功
+  - 当前最值得记住的新判断：
+    - `place_container_plate` 现在已经不再是“完全没有 grasp semantics”
+    - 而是进入了“部分实例只能做到 compatible fallback，尚未稳定命中 preferred family”的阶段
+      - `transport_confidence`
+      - `correction_risk_xy`
+  - 第一轮保守融合：
+    - 候选选择几乎未变
+    - `xy_norm` 仍约 `0.182`
+  - 第二轮加入“横向修正风险”后：
+    - `PlaceRelease` 首选候选已从 `primary` 切到 `approach_xy_target_z`
+    - 说明评分已经真正开始影响 runtime 决策
+    - 但最终 env success 仍失败，且 `xy_norm` 约 `0.186`
+  - 由此得到的最新判断：
+    - 当前不能继续只往“更保守、少修正”一个方向压
+    - 下一步需要建模“部分修正能力”
+    - 即：某类放置动作到底能修正多少当前中心误差，而不是在“完全修正”和“几乎不修正”之间二选一
+  - 并行回归结果：
+    - `place_empty_cup` 在两轮 conservative ranking 后均保持成功
+  - 随后继续推进：
+    - 已把“部分修正能力”正式接入 place candidate ranking
+    - 新增：
+      - `partial_correction_gain`
+      - `realized_correction_fraction`
+    - 最新 `PlaceRelease` 首选候选已从 `approach_xy_target_z` 切到 `approach_to_release_35`
+    - 说明 runtime 已开始偏向“适度修正”的候选，而不是继续只选最保守动作
+  - 最新复验：
+    - `partial_correction_v3_seed2`
+    - 最终 `xy_norm` 约 `0.181`
+    - env success 仍未通过，但比过于保守时的 `~0.186` 有所改善
+  - 同轮还修复了一个状态诊断问题：
+    - `is_grasped()` 过去会把“夹爪已张开但物体仍高于初始高度”误判成“仍在抓取”
+    - 导致 `Retreat / CheckTaskSuccess` trace 里状态反跳
+    - 修复后，release 后的 `is_grasped` 在最新 run 中保持为 `false`
+  - 同日还完成了一次更重要的结构性重构：
+    - 已新增 `.codex/PLACE_PARADIGM_ROADMAP_2026-04-17.md`
+    - 已把放置阶段升级为可插拔 `place module`
+  - 当前新增代码边界：
+    - `script_runtime/place/module_base.py`
+    - `script_runtime/place/heuristic.py`
+    - `script_runtime/place/__init__.py`
+  - 现在 `PlaceApproach / PlaceRelease` 的职责已经收缩为：
+    - 读取 target pose
+    - 解析 `place_module`
+    - 调用模块执行
+  - 当前默认模块仍是 `heuristic_place_module`
+  - 但后续已经可以直接接：
+    - `closed_loop_place_module`
+    - `learned_place_module`
+  - 这意味着后续切换范式时，不需要再反复改 `PlaceApproach / PlaceRelease` skill 本体
+  - 同日晚些时候，第一版 `closed_loop_place_module` 已真正落地：
+    - 先走 heuristic baseline release
+    - 再利用 `object_to_target_center_delta` 做短程闭环修正
+    - 若修正方向明显变差，则回退到 best pose
+  - 当前 smoke 结果：
+    - `closed_loop_smoke_cup` 成功
+    - `closed_loop_smoke_container_v3` 仍未过 env success
+    - 但 `PlaceRelease` baseline `xy_norm` 约 `0.1841`
+    - final `xy_norm` 约 `0.1806`
+    - `alignment_steps=3`
+  - 当前结论：
+    - 闭环模块已经开始真实起作用
+    - 但当前局部 transport / correction model 仍过于粗糙
+    - 下一步不应回去继续堆 hand-crafted place ranker
+    - 而应继续强化 closed-loop correction model 本身
+  - 随后又继续推进了一步：
+    - `closed_loop_place_module` 已升级成在线局部响应模型
+    - 每一步会显式记录：
+      - `response_matrix_before`
+      - `predicted_after_error`
+      - `observed_error_delta`
+      - `response_matrix_after`
+    - 当前已经不再只是“按当前误差直接推一把”
+  - 最新真实任务结果：
+    - `adaptive_closed_loop_cup` 成功
+    - `adaptive_closed_loop_container` 虽未过 env success
+    - 但 `PlaceRelease` baseline `xy_norm` 约 `0.1852`
+    - final `xy_norm` 约 `0.1815`
+    - 且 `correction_model_final` 已明显偏离初始对角矩阵，说明在线模型开始学习局部响应
+- 2026-04-19 最新 FM-first grasp 记忆更新：
+  - `FoundationPose` 已真实进入 `GetObjectPose` 主链，不再只是 inspect runner 成功
+  - `Contact-GraspNet` 当前不再只是独立 headless 成功或 raw candidate 进 trace：
+    - 已新增 `contact_graspnet_guided_contact_family` 这层混合桥接
+    - 机制是：
+      - 先保留 raw CGN contact evidence
+      - 再用 RoboTwin 已知 planner-feasible contact family 模板生成 `guided` 候选
+      - trace 中通过 `proposal_sources = ["contact_graspnet", "template_contact_*", "guided_contact_family"]` 显式标注这不是“原始 CGN pose 直接成功”
+  - 当前关键真实验收：
+    - `script_runtime/artifacts/robotwin_place_container_plate/fm_runtime_grasp_main_v2/`
+    - `script_runtime/artifacts/robotwin_place_container_plate/fm_runtime_grasp_main_v4/`
+  - 关键信号：
+    - `GetGraspCandidates.selected_backend = contact_graspnet`
+    - top-ranked 候选已变成：
+      - `contact_graspnet_guided_c2`
+      - `contact_graspnet_guided_c0`
+      - `contact_graspnet_guided_c1`
+    - 它们都具有：
+      - `planner_status = Success`
+      - `task_compatibility = preferred`
+    - `ExecuteGraspPhase` 实际执行的目标 pose 已对应 `contact_graspnet_guided_c2`
+    - 不再只是“trace 名字看起来像切到了 CGN”
+  - 同时确认了一条无效路线：
+    - 直接把 raw CGN pose 用 template orientation 做 `template_transfer`
+    - 目前大多仍 planner fail
+    - 因而当前更靠谱的桥接方式不是“强行让 raw pose 直接可用”
+    - 而是“让 CGN 先承担 contact-family evidence / rerank 角色，再复用 planner-feasible execution template”
+  - 本轮还补了一个通用规则：
+    - grasp semantic 排序必须先看 `planner_status`
+    - 不能让“语义更像对的失败候选”压过“真的可执行的成功候选”
+  - 当前下一优先级因此收敛为：
+    - 继续提升 guided candidate 的真实性与可解释性
+    - 比较 `guided_c0/c1/c2` 在多 seed 下的稳定性
+    - 再决定是否继续深挖 raw CGN pose 直连 planner 这条线
+  - 随后已完成第一轮 `place_container_plate_robotwin_fm_first` 多 seed 稳定性复验：
+    - 运行器：
+      - `script_runtime.runners.evaluate_robotwin_fm_guided_stability`
+    - 主样例：
+      - `script_runtime/artifacts/robotwin_place_container_plate/fm_guided_seed_sweep_v1/`
+    - 当前 6 个 seed 汇总结论：
+      - `guided_c0` 是最稳的执行族：
+        - `3/3` env success
+        - `3/3` post-lift grasp success
+      - `guided_c2` 可用但不够稳：
+        - `2` 次执行里只有 `1` 次 env success
+      - 唯一纯 fallback run 是：
+        - `seed=2`
+        - `selected_backend = depth_synthesized`
+        - `executed = contact_0`
+        - 最终 `env_success = false`
+  - 对 `seed=2` 与 `seed=6` 的左臂对比已进一步收敛出一个关键工程判断：
+    - `seed=2` 不是“guided 候选被排序压掉”
+    - 而是 cup 这个实例根本没有形成任何 `planner_status=Success` 的 guided family
+    - 当时 trace 中：
+      - raw `Contact-GraspNet` 仍有大量 proposal
+      - 但所有 `contact_graspnet_seg1_*` 都 planner fail
+      - 只有 depth fallback 的 `contact_0` 可执行
+    - 相比之下，`seed=6` 的 bowl 左臂实例中：
+      - `contact_graspnet_guided_c0/c1/c2` 都是 planner-feasible
+      - 其中 `guided_c0` 最终稳定执行并成功
+    - 当前更像：
+      - `021_cup` 某些实例的 rim contact geometry / semantic grouping 还不足以支撑 guided family
+    - 而不是：
+      - 应该优先继续深挖 raw CGN pose 直连 planner
+  - 因此当前主判断更新为：
+    - 先继续围绕 `guided family availability` 做实例差异分析与 hardening
+    - 优先关注：
+      - `021_cup` 左臂 case
+      - reference contact 是否缺失
+      - guided contact distance / template coverage
+    - 暂不把“raw CGN pose 直接进 planner”升为主线
 - 当前最值得保留的东西是：
   - 执行层骨架
   - `arm_control_sdk` 真机边界
@@ -139,6 +760,13 @@
 - 尽量把“功能需求 -> 候选仓库 -> 复用方式”写清楚，再动手编码
 - 优先复用成熟模块，避免在行为树、规划、grasp、pose 这类已有成熟实现的方向重复造轮子
 - 如果最终没有复用代码，也至少要参考对应仓库的接口、数据流或验证方式
+- 已明确新的推进约定：
+  - 允许 case-driven hardening 暴露问题
+  - 但一旦同类修复在多个 run / seed / task 中重复出现，必须上提成通用能力
+  - 当前第一批应抽象的通用轮子是：
+    - `candidate family`
+    - `planner feedback adapter`
+    - `failure cluster / recovery policy`
 
 ## 下一次继续施工时优先检查
 
@@ -152,3 +780,65 @@
 8. 是否要把当前 `place_empty_cup` 结果做成 rollout 可视化 / GIF / grounding 可视化
 9. 下一个 RoboTwin 任务优先选更贴近真实复杂放置语义的任务，而不只是单杯单 coaster
 10. 真实视角导出优先检查已有 `rollout.gif` / `grounding.json`，必要时先用 `render_robotwin_realview_summary` 做快速可视化
+- 2026-04-20 FM-first 收口本轮新增关键记忆：
+  - `script_runtime/adapters/fm_grasp_stack.py` 已完成一轮平台收口：
+    - `last_grasp_stage_summary` 现在稳定暴露：
+      - `selected_backend`
+      - `selected_backend_kind`
+      - `fallback_reason`
+      - `guided_candidate_count`
+      - `guided_feasible_families`
+      - `raw_contact_candidate_count`
+      - `template_transfer_candidate_count`
+      - `guided_merge_coverage_ratio`
+      - `guided_rejection_reasons`
+      - `contact_graspnet_summary`
+      - `template_source_debug`
+    - `GetGraspCandidates` payload 与 `evaluate_robotwin_fm_guided_stability` 已能直接读取这些字段
+  - `FoundationPose` / `Contact-GraspNet` inspect runner 已升级为正式验证入口：
+    - `inspect_foundationpose_backend --attempt-run` 与 `inspect_contact_graspnet_backend --attempt-run`
+      都已跑出 `attempted_run=true` 与真实 backend invocation
+  - `ContactGraspNetBackend` 已新增：
+    - candidate budget reservation，避免 raw CGN 挤掉 guided/template
+    - `guided_availability_bridge`
+    - `template_source_debug`
+  - 2026-04-20 关键 runtime 结论更新：
+    - `fm_guided_platform_verify_v3` 明确证明：
+      - `seed=2` 不是没有模板源
+      - 而是左臂 donor source 中：
+        - `delegate_candidate_count=2`
+        - `matching_arm_candidate_count=2`
+        - `feasible_template_count=0`
+      - 即 donor 在“必须 planner success 才能作模板”这层被提前筛空
+    - 因此已做两层修复：
+      1. donor 资格拆成：
+         - 严格模板源：仍要求 planner feasible
+         - bridge donor 源：允许 pose-ready 但当前 planner 未过，只用于 availability bridge
+      2. template donor source 默认改为优先读取 `robotwin_depth_provider`
+         - 不再只读 `sdk.get_grasp_candidates()`
+         - 这样 donor source 与主 fallback `depth_synthesized` 对齐
+         - `template_source_debug.source_kind` 现在会显式标记 `template_delegate`
+  - 最新真实验证：
+    - `script_runtime/artifacts/robotwin_place_container_plate/fm_guided_platform_verify_v5/`
+    - `seed=6` 保持健康：
+      - `selected_backend=contact_graspnet`
+      - `selected_backend_kind=fm_backend`
+      - `top/executed=contact_graspnet_guided_c0`
+      - `post-lift CheckGrasp.grasp_confirmed=true`
+      - `env_success=true`
+    - `seed=2` 已完成本轮最关键前移：
+      - 首次 `GetGraspCandidates` 已切到：
+        - `selected_backend=contact_graspnet`
+        - `selected_backend_kind=fm_backend`
+        - `guided_feasible_families=['contact_graspnet_guided_c0']`
+      - top-1 已变为 `contact_graspnet_guided_c0`
+      - 说明 `021_cup` 左臂 hard case 已从 fallback 主导切回正式 guided 控制流
+      - 但该 run 最终仍失败在 `ExecuteGraspPhase` / grasp closure：
+        - 没有推进到 `CheckGrasp` / `Lift`
+        - 当前新瓶颈已从“guided availability 缺失”前移为“guided candidate 真执行时的 grasp closure 稳定性”
+  - 当前下一步默认优先级：
+    - 不再继续扩新 heuristic family
+    - 也不再把主要精力放在 place/env success
+    - 先围绕 `seed=2` 的 `contact_graspnet_guided_c0` 执行失败做：
+      - execute grasp command / contact geometry / closure 诊断
+      - 明确是抓取姿态、接近方向、还是 runtime 执行阶段导致掉抓

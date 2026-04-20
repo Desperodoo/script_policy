@@ -1,0 +1,62 @@
+runtime:
+  task_id: ""
+  trace_path: script_runtime/artifacts/robotwin_place_empty_cup_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_place_empty_cup
+  place_module:
+    type: closed_loop
+    max_alignment_steps: 2
+    xy_gain: 0.4
+    z_gain: 0.15
+    xy_step_limit: 0.02
+    z_step_limit: 0.008
+    alignment_speed: 0.12
+    target_xy_tolerance: 0.025
+    target_z_tolerance: 0.015
+    min_xy_improvement: 0.0001
+
+robotwin:
+  task_name: place_empty_cup
+  task_config: demo_clean
+  seed: 0
+  episode_index: 0
+  render_freq: 0
+  use_seed: true
+  collect_data: false
+  save_data: false
+  eval_mode: true
+  object_attr: cup
+  target_attr: coaster
+  target_functional_point_id: 0
+  pregrasp_distance: 0.1
+  place_approach_distance: 0.05
+  place_release_distance: 0.02
+  retreat_distance: 0.08
+  camera_shader_dir: default
+  capture_video: true
+  capture_every_n_steps: 3
+  episode_name: place_empty_cup
+
+execution:
+  active_source: policy
+  control_owner: script_runtime
+
+task_goal:
+  task_name: place_empty_cup
+  target_object: cup
+  target_surface: coaster
+
+scene:
+  workspace_ready: true
+  tracking_lost: false
+  depth_anomaly: false
+  detection_confidence: 1.0
+  calibration_version: robotwin
+
+poses:
+  home_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  reset_joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+gripper:
+  open_width: 1.0
+  close_width: 0.0
+  tau: 1.0

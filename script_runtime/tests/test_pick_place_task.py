@@ -1,8 +1,15 @@
 from script_runtime.core import FailureCode, Skill, SkillContext, SkillRegistry, SkillStatus
 from script_runtime.core.result_types import SkillResult
 from script_runtime.executors import TreeExecutor
-from script_runtime.skills.checks import CheckContact, CheckGrasp, CheckSceneReady, CheckTaskSuccess, WaitForObjectStable
-from script_runtime.skills.gripper import ExecuteGraspPhase, OpenGripper
+from script_runtime.skills.checks import (
+    CheckContact,
+    CheckGrasp,
+    CheckSceneReady,
+    CheckTaskSuccess,
+    ReselectGraspAfterPregrasp,
+    WaitForObjectStable,
+)
+from script_runtime.skills.gripper import ExecuteGraspPhase, OpenGripper, PrepareGripperForGrasp
 from script_runtime.skills.motion import GoHome, GoPregrasp, Lift, PlaceApproach, PlaceRelease, Retreat
 from script_runtime.skills.perception import GetGraspCandidates, GetObjectPose, ReacquirePerception
 from script_runtime.skills.recovery import HumanTakeover, RetryWithNextCandidate, SafeRetreat
@@ -35,8 +42,10 @@ def build_registry():
     registry.register(ReacquirePerception())
     registry.register(CheckGrasp())
     registry.register(CheckTaskSuccess())
+    registry.register(ReselectGraspAfterPregrasp())
     registry.register(ExecuteGraspPhase())
     registry.register(OpenGripper())
+    registry.register(PrepareGripperForGrasp())
     registry.register(SafeRetreat())
     registry.register(RetryWithNextCandidate())
     registry.register(HumanTakeover())
@@ -74,6 +83,9 @@ def test_pick_place_nominal_flow(blackboard, adapters):
     context = SkillContext(blackboard=blackboard, adapters=adapters, task_id="pick-place-1")
     result = executor.run(context)
     assert result.status == SkillStatus.SUCCESS
+    sdk_commands = [command["type"] for command in adapters["sdk"].commands]
+    assert "open_gripper" in sdk_commands
+    assert sdk_commands.index("open_gripper") < sdk_commands.index("close_gripper")
 
 
 def test_pick_place_fails_without_candidates(blackboard, adapters):

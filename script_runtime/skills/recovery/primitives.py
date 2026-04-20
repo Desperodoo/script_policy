@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
+from typing import Any, Dict, Optional
+
 from script_runtime.core.failure_codes import FailureCode
 from script_runtime.core.result_types import SkillResult
-from script_runtime.core.skill_base import Skill, SkillContext
+from script_runtime.core.skill_base import Skill, SkillContext, request_world_refresh
+
+
+def _candidate_identity(candidate: Dict[str, Any]) -> tuple:
+    contact_id = candidate.get("contact_point_id")
+    if contact_id is not None:
+        return ("contact", int(contact_id), str(candidate.get("arm", "") or ""))
+    pose = tuple(round(float(v), 5) for v in list(candidate.get("pose") or [])[:7])
+    return ("pose", str(candidate.get("arm", "") or ""), pose)
+
+
+def _find_active_candidate_index(candidates: list[Dict[str, Any]], active_candidate: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not active_candidate:
+        return None
+    active_key = _candidate_identity(active_candidate)
+    for index, candidate in enumerate(candidates):
+        if _candidate_identity(candidate) == active_key:
+            return index
+    return None
 
 
 class SafeRetreat(Skill):
@@ -41,8 +61,7 @@ class SafeRetreat(Skill):
                 result = sdk.move_j(target, speed=0.3)
             attempted.append({"label": label, "action": action, "ok": bool(result.get("ok", False))})
             if result.get("ok", False):
-                if hasattr(sdk, "refresh_world"):
-                    sdk.refresh_world(context.blackboard)
+                request_world_refresh(context, sdk, reason="post_SafeRetreat")
                 return SkillResult.success(command=result["command"], fallback_used=label if label != "retreat_pose" else "")
 
         return SkillResult.failure(
@@ -71,15 +90,52 @@ class RetryWithNextCandidate(Skill):
     def run(self, context: SkillContext) -> SkillResult:
         candidates = list(context.world_state.learned.grasp_candidates)
         if len(candidates) <= 1:
-            return SkillResult.failure(FailureCode.NO_GRASP_CANDIDATE, message="No next candidate available")
-        candidates.pop(0)
+            return SkillResult.failure(
+                FailureCode.NO_GRASP_CANDIDATE,
+                message="No next candidate available",
+                grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+            )
+        active_candidate = dict(context.blackboard.get("active_grasp_candidate") or {})
+        active_index = _find_active_candidate_index(candidates, active_candidate)
+        pop_index = 0 if active_index is None else active_index
+        rejected = [candidates.pop(pop_index)]
+        next_index = self._next_feasible_index(candidates)
+        if next_index is None:
+            return SkillResult.failure(
+                FailureCode.NO_GRASP_CANDIDATE,
+                message="No planner-feasible next candidate available",
+                rejected_candidates=rejected,
+                grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+            )
+        if next_index > 0:
+            rejected.extend(candidates[:next_index])
+            candidates = candidates[next_index:]
+        next_candidate = candidates[0]
         context.blackboard.update_world(learned={"grasp_candidates": candidates})
-        context.blackboard.set("active_grasp_candidate", candidates[0])
-        if candidates[0].get("pose") is not None:
-            context.blackboard.set("active_grasp_pose", candidates[0]["pose"])
-        if candidates[0].get("pregrasp_pose") is not None:
-            context.blackboard.set("pregrasp_pose", candidates[0]["pregrasp_pose"])
-        return SkillResult.success(next_candidate=candidates[0])
+        context.blackboard.set("active_grasp_candidate", next_candidate)
+        if next_candidate.get("pose") is not None:
+            context.blackboard.set("active_grasp_pose", next_candidate["pose"])
+        if next_candidate.get("pregrasp_pose") is not None:
+            context.blackboard.set("pregrasp_pose", next_candidate["pregrasp_pose"])
+        return SkillResult.success(
+            next_candidate=next_candidate,
+            rejected_candidates=rejected,
+            grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+        )
+
+    @staticmethod
+    def _next_feasible_index(candidates):
+        best_unknown = None
+        for index, candidate in enumerate(candidates):
+            compatibility = str(candidate.get("task_compatibility", "unknown") or "unknown")
+            if compatibility == "incompatible":
+                continue
+            status = str(candidate.get("planner_status", "Unknown"))
+            if status == "Success":
+                return index
+            if status not in {"Failure", "Fail"} and best_unknown is None:
+                best_unknown = index
+        return best_unknown
 
 
 class HumanTakeover(Skill):

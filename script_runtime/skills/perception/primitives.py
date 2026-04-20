@@ -8,6 +8,12 @@ from script_runtime.adapters import PerceptionObservation
 from script_runtime.core.failure_codes import FailureCode
 from script_runtime.core.result_types import RecoveryAction, SkillResult
 from script_runtime.core.skill_base import Skill, SkillContext
+from script_runtime.planning import (
+    annotate_grasp_candidates,
+    resolve_grasp_semantic_policy,
+    resolve_runtime_task_name,
+    sort_grasp_candidates_by_semantics,
+)
 
 
 def _build_observation(context: SkillContext) -> PerceptionObservation:
@@ -89,9 +95,31 @@ class GetObjectPose(Skill):
         if pose is None:
             return SkillResult.failure(FailureCode.NO_OBJECT_DETECTED, message="Object pose unavailable")
         context.blackboard.update_world(scene={"object_pose": pose})
+        pose_diagnostics = list(getattr(pose_provider, "last_pose_diagnostics", []) or [])
+        grounding_diagnostics = list(getattr(pose_provider, "last_target_diagnostics", []) or [])
+        component_diagnostics = list(getattr(pose_provider, "last_component_diagnostics", []) or [])
+        target_stage_summary = dict(getattr(pose_provider, "last_target_stage_summary", {}) or {})
+        pose_stage_summary = dict(getattr(pose_provider, "last_pose_stage_summary", {}) or {})
+        if pose_diagnostics:
+            context.blackboard.set("object_pose_diagnostics", pose_diagnostics)
+        if grounding_diagnostics:
+            context.blackboard.set("target_grounding_diagnostics", grounding_diagnostics)
+        if component_diagnostics:
+            context.blackboard.set("object_component_diagnostics", component_diagnostics)
+        if target_stage_summary:
+            context.blackboard.set("target_grounding_stage_summary", target_stage_summary)
+        if pose_stage_summary:
+            context.blackboard.set("object_pose_stage_summary", pose_stage_summary)
         return SkillResult.success(
             object_pose=pose,
             perception_source=pose_source,
+            selected_backend=pose_stage_summary.get("selected_backend", pose_source),
+            fallback_reason=pose_stage_summary.get("fallback_reason", ""),
+            target_grounding_stage_summary=target_stage_summary,
+            object_pose_stage_summary=pose_stage_summary,
+            object_pose_diagnostics=pose_diagnostics,
+            target_grounding_diagnostics=grounding_diagnostics,
+            object_component_diagnostics=component_diagnostics,
             used_camera=observation.rgb is not None or observation.depth is not None,
         )
 
@@ -136,13 +164,48 @@ class GetGraspCandidates(Skill):
                 item["score"] = score
                 enriched.append(item)
             candidates = sorted(enriched, key=lambda item: item.get("score", 0.0), reverse=True)
+        task_name = resolve_runtime_task_name(candidate_provider, fallback_provider, context=context)
+        candidates = annotate_grasp_candidates(task_name, candidates, blackboard=context.blackboard)
+        candidates = sort_grasp_candidates_by_semantics(candidates)
+        semantic_policy = resolve_grasp_semantic_policy(task_name, blackboard=context.blackboard)
         context.blackboard.update_world(learned={"grasp_candidates": candidates})
         context.blackboard.set("active_grasp_candidate", candidates[0])
         if candidates[0].get("pose") is not None:
             context.blackboard.set("active_grasp_pose", candidates[0]["pose"])
         if candidates[0].get("pregrasp_pose") is not None:
             context.blackboard.set("pregrasp_pose", candidates[0]["pregrasp_pose"])
-        return SkillResult.success(grasp_candidates=candidates, candidate_source=candidate_source)
+        context.blackboard.set("grasp_semantic_policy", semantic_policy)
+        context.blackboard.set("visual_review_required", bool(semantic_policy.get("visual_review_required", False)))
+        planner_diagnostics = []
+        if candidate_provider is not None:
+            planner_diagnostics = list(getattr(candidate_provider, "last_grasp_diagnostics", []) or [])
+        grounding_diagnostics = []
+        if candidate_provider is not None:
+            grounding_diagnostics = list(getattr(candidate_provider, "last_target_diagnostics", []) or [])
+        target_stage_summary = dict(getattr(candidate_provider, "last_target_stage_summary", {}) or {})
+        grasp_stage_summary = dict(getattr(candidate_provider, "last_grasp_stage_summary", {}) or {})
+        context.blackboard.set("grasp_candidate_diagnostics", planner_diagnostics)
+        if grounding_diagnostics:
+            context.blackboard.set("target_grounding_diagnostics", grounding_diagnostics)
+        if target_stage_summary:
+            context.blackboard.set("target_grounding_stage_summary", target_stage_summary)
+        if grasp_stage_summary:
+            context.blackboard.set("grasp_candidate_stage_summary", grasp_stage_summary)
+        return SkillResult.success(
+            grasp_candidates=candidates,
+            candidate_source=candidate_source,
+            selected_backend=grasp_stage_summary.get("selected_backend", candidate_source),
+            selected_backend_kind=grasp_stage_summary.get("selected_backend_kind", ""),
+            fallback_reason=grasp_stage_summary.get("fallback_reason", ""),
+            guided_feasible_families=list(grasp_stage_summary.get("guided_feasible_families", []) or []),
+            has_guided_feasible_family=bool(grasp_stage_summary.get("has_guided_feasible_family", False)),
+            target_grounding_stage_summary=target_stage_summary,
+            grasp_candidate_stage_summary=grasp_stage_summary,
+            grasp_candidate_diagnostics=planner_diagnostics,
+            target_grounding_diagnostics=grounding_diagnostics,
+            grasp_semantic_policy=semantic_policy,
+            active_grasp_affordance=candidates[0].get("affordance", {}),
+        )
 
     def recover(self, context: SkillContext):
         return RecoveryAction(name="ReacquirePerception")

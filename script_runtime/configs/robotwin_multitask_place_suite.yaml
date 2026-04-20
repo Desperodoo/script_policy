@@ -1,0 +1,62 @@
+suite_name: robotwin_multitask_place_baseline
+artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_baseline
+default_seeds: [1, 2, 3]
+default_no_video: true
+
+entries:
+  - name: place_empty_cup
+    group: regression_existing
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_empty_cup_robotwin.yaml
+
+  - name: place_mouse_pad
+    group: regression_existing
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_mouse_pad_robotwin.yaml
+
+  - name: place_container_plate
+    group: regression_existing
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_container_plate_robotwin.yaml
+
+  - name: place_phone_stand
+    group: config_first_place
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_phone_stand_robotwin.yaml
+
+  - name: place_shoe
+    group: config_first_place
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_shoe_robotwin.yaml
+
+  - name: place_object_stand
+    group: config_first_place
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_object_stand_robotwin.yaml
+
+  - name: place_can_basket
+    group: deferred_complex_place
+    mode: baseline
+    enabled: false
+    config_path: tasks/place_can_basket_robotwin.yaml
+    deferred_reason: requires a new task tree for staged basket placement and follow-up grasp semantics
+
+  - name: place_object_basket
+    group: deferred_complex_place
+    mode: baseline
+    enabled: false
+    config_path: tasks/place_object_basket_robotwin.yaml
+    deferred_reason: requires a new task tree for basket placement and post-place motion semantics
+
+  - name: place_bread_basket
+    group: deferred_complex_place
+    mode: baseline
+    enabled: false
+    config_path: tasks/place_bread_basket_robotwin.yaml
+    deferred_reason: requires a new task tree for multi-object sequence and dual-arm coordination

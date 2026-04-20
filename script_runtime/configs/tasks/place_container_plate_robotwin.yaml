@@ -35,6 +35,11 @@ task_goal:
   target_object: container
   target_surface: plate
 
+grasp_semantics:
+  required: true
+  required_affordances: [rim_grasp, body_support]
+  visual_review_required: true
+
 scene:
   workspace_ready: true
   tracking_lost: false

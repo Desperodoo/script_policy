@@ -137,6 +137,16 @@
 - 对当前仓库价值：
   - 如果后面我们用深度 / TSDF 重建抓取候选，这个仓库很有参考价值
 
+### 3.5 `GraspGen`
+
+- 仓库：`https://github.com/NVlabs/GraspGen`
+- 适合参考：
+  - foundation-model 风格的 grasp generation 路线
+  - 作为 `Contact-GraspNet / GraspNet` 之外的第三条 grasp proposal 候选
+- 对当前仓库价值：
+  - 很适合放进 `FM-first grasp stack` 做横向对比
+  - 即使暂时不直接复用，也值得优先参考其输入输出组织
+
 ## 4. 目标物体定位 / 开放世界目标 grounding / 6D pose
 
 ### 4.1 `FoundationPose`
@@ -167,6 +177,25 @@
   - mask 级目标提取
 - 对当前仓库价值：
   - 适合配合 GroundingDINO 或其它 detector，形成实例分割输入
+
+### 4.4 `Grounded-SAM-2`
+
+- 仓库：`https://github.com/IDEA-Research/Grounded-SAM-2`
+- 适合参考：
+  - 文本驱动目标 grounding + segmentation + tracking 的整合流程
+- 对当前仓库价值：
+  - 很适合作为 `TargetGrounder` 的首批后端
+  - 可以把“抓哪个物体”从 task-specific 逻辑里正式拆出来
+
+### 4.5 `Manipulate-Anything`
+
+- 仓库：`https://github.com/Robot-MA/manipulate-anything`
+- 适合参考：
+  - foundation-model 参与真实操作任务的整体范式
+  - 目标 grounding 与 manipulation 之间的接口设计
+- 对当前仓库价值：
+  - 更适合参考架构和模块边界
+  - 不应直接替代当前 runtime，但非常适合指导上游模块化设计
 
 ## 5. 仿真平台 / 任务资源
 
@@ -218,16 +247,36 @@
 
 - 第一参考：`Contact-GraspNet`
 - 第二参考：`GraspNet Baseline`
-- 第三参考：`VGN`
+- 第三参考：`GraspGen`
+- 第四参考：`VGN`
 
 ### 文本到目标物体 grounding
 
-- 第一参考：`GroundingDINO`
-- 第二参考：`SAM 2`
+- 第一参考：`Grounded-SAM-2`
+- 第二参考：`GroundingDINO`
+- 第三参考：`SAM 2`
 
 ### 复杂物体 6D pose / tracking
 
 - 第一参考：`FoundationPose`
+
+### FM-first grasp stack
+
+- Grounding：
+  - `Grounded-SAM-2`
+  - `GroundingDINO + SAM 2`
+- Pose：
+  - `FoundationPose`
+- Grasp proposal：
+  - `Contact-GraspNet`
+  - `GraspNet Baseline`
+  - `GraspGen`
+- Task-aware rerank：
+  - `GraspGPT / FoundationGrasp`
+
+默认准则：
+- 当前复杂任务默认先按这条栈做多后端横向试验
+- 不再只押单一 heuristic provider
 
 ## 7. 实施准则
 

@@ -12,6 +12,7 @@
 - 通过 adapter 复用现有 `arm_control_sdk/` 与 `rlft/`
 - 旧仓库中的 ROS 部署链仅保留为未来可选融合层，而不是首阶段依赖
 - 首个验收任务线固定为 `pick-place`
+- 复杂任务默认把 `grasp affordance -> semantic grasp check -> visual review` 当成一等能力，而不是只靠 `is_grasped()` 和末端成功标量
 
 当前首版已包含：
 - `core/`：blackboard、skill base、registry、failure code、result type
@@ -117,6 +118,34 @@ python -m script_runtime.runners.robotwin_pick_place
 - 这版重点是把 runtime adapter 契约和 RoboTwin 任务语义接起来，先让 `GetObjectPose / GetGraspCandidates / CheckGrasp / CheckTaskSuccess` 走同一条链
 - 资产没下载完整时，`robotwin_smoke_test.py` 会直接给出缺失项，不会误判成 Python 环境问题
 
+抓取语义与真实任务验收的当前约束：
+
+- `GetGraspCandidates` 现在会为候选写入：
+  - `affordance`
+  - `affordance_type`
+  - `functional_role`
+  - `task_compatibility`
+- `CheckGrasp` 不再只回答“抓住了没有”，还会输出 `grasp_semantic_report`
+- 复杂任务可通过配置新增：
+
+```yaml
+grasp_semantics:
+  required: true
+  required_affordances: [handle, body_support]
+  visual_review_required: true
+  overrides:
+    - task_name: place_container_plate
+      contact_point_id: 0
+      affordance_type: handle
+      functional_role: carry
+```
+
+- 真实 RoboTwin 任务每轮默认应检查：
+  - rollout gif
+  - realview contact sheet
+  - trace 中的 `grasp_semantic_report`
+- 如果图片与标量结论冲突，以图片暴露的问题优先
+
 真实视角导出当前建议走“双轨”：
 
 ```bash
@@ -152,9 +181,67 @@ python -m script_runtime.runners.render_robotwin_skill_snapshots \
 ```bash
 python scripts/robotwin_smoke_test.py --task place_container_plate --config demo_clean --setup-demo
 python -m script_runtime.runners.robotwin_pick_place --config script_runtime/configs/tasks/place_container_plate_robotwin.yaml
+python -m script_runtime.runners.robotwin_pick_place --config script_runtime/configs/tasks/place_container_plate_robotwin_fm_first.yaml
+python -m script_runtime.runners.inspect_fm_grasp_stack --config script_runtime/configs/tasks/place_container_plate_robotwin_fm_first.yaml
+python -m script_runtime.runners.inspect_foundationpose_backend --config script_runtime/configs/tasks/place_container_plate_robotwin_fm_first.yaml
+python -m script_runtime.runners.inspect_contact_graspnet_backend --config script_runtime/configs/tasks/place_container_plate_robotwin_fm_first.yaml
 ```
 
 说明：
 - 当前默认配置使用 `seed: 1`，这是已经验证成功的一组场景
 - `seed: 3` 也已成功
-- `seed: 2` 会失败在 recovery 的 `SafeRetreat`，说明当前主要瓶颈是 planner/recovery 稳定性，而不是 adapter 接线
+- `seed: 2` 早期曾失败在 `SafeRetreat`
+- 当前更重要的新结论是：
+- 复杂任务不能再只把问题理解成 planner/recovery 或 release 精度
+- 抓取语义是否正确、是否抓到了任务需要的物体部位，已经成为同等优先级甚至更高优先级的问题
+- 当前新增的上游默认路线：
+  - `FM-first grasp stack + runtime execution`
+  - 通过 `perception_stack.type = fm_first` 启用
+  - 当前第一版已接入统一多后端骨架：
+    - `TargetGrounder`
+    - `ObjectPoseEstimator`
+    - `GraspProposalBackend`
+    - `TaskAwareGraspReranker`
+  - 当前已落地的后端 scaffold：
+    - `GroundedSAM2Grounder`
+    - `FoundationPoseEstimator`
+    - `ContactGraspNetBackend`
+    - `GraspNetBaselineBackend`
+    - `GraspGenBackend`
+  - 2026-04-18 最新状态：
+    - `GroundedSAM2Grounder` 已不再是纯 scaffold
+    - 当前通过 `transformers + GroundingDINO HF` 在 RoboTwin 真实相机画面上输出 bbox
+    - 最新 inspect 样例：
+      - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v2/`
+    - 已导出：
+      - `fm_stack_compare_seed1_v2_fm_grasp_inspect.json`
+      - `fm_stack_compare_seed1_v2_fm_grasp_inspect_grounding_overlay.png`
+    - 当前 grounding 已进一步加入语义 + 几何二次筛选
+    - 最新样例：
+      - `script_runtime/artifacts/robotwin_place_container_plate/fm_stack_compare_seed1_v3/`
+    - 当前能把中间 plate 候选显式压低，把右侧真实 container 提到第一位
+    - 当前 `FoundationPose / Contact-GraspNet` 仍停留在 readiness 诊断阶段：
+      - `FoundationPose`：`weights_missing + missing_dependency_pytorch3d + missing_dependency_nvdiffrast`
+      - `Contact-GraspNet`：`checkpoints_missing + missing_dependency_tensorflow`
+    - 已新增两个独立 backend inspect runner：
+      - `inspect_foundationpose_backend`
+      - `inspect_contact_graspnet_backend`
+    - 它们会导出 repo 原生输入包和命令模板，便于后续直接在各自依赖环境里验证
+  - 当前保留的可运行 fallback：
+    - `robotwin_depth`
+    - `oracle_pose`
+    - `oracle_feasibility`
+    - `depth_synthesized`
+  - `inspect_fm_grasp_stack` 可单独导出：
+    - target grounding diagnostics
+    - object pose diagnostics
+    - grasp backend comparison diagnostics
+
+最近一轮语义脚手架真实回归：
+
+- run 目录：`script_runtime/artifacts/robotwin_place_empty_cup/grasp_semantics_scaffold_smoke/`
+- 结果：
+  - 任务最终失败在后段 `PlaceApproach`
+  - 但新的 `affordance / task_compatibility / grasp_semantic_report` 已真实写入 trace
+  - real-view artifact 也已正常导出
+- 这说明新的语义脚手架已经接入真实 RoboTwin runtime，而不只是停留在单测中

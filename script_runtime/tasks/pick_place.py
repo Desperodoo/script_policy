@@ -18,7 +18,13 @@ class PickPlaceTask(ScriptTask):
         grasp_attempt = SequenceNode(
             "grasp_attempt",
             [
+                TimeoutNode(
+                    "prepare_gripper_timeout",
+                    SkillNode("prepare_gripper_for_grasp", "PrepareGripperForGrasp"),
+                    timeout_s=10.0,
+                ),
                 TimeoutNode("go_pregrasp_timeout", SkillNode("go_pregrasp", "GoPregrasp"), timeout_s=8.0),
+                SkillNode("reselect_grasp_after_pregrasp", "ReselectGraspAfterPregrasp"),
                 TimeoutNode("grasp_phase_timeout", SkillNode("execute_grasp_phase", "ExecuteGraspPhase"), timeout_s=8.0),
                 SkillNode("check_grasp", "CheckGrasp"),
                 SkillNode("lift", "Lift"),

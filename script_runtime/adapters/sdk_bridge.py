@@ -64,6 +64,15 @@ class SDKBridge:
     def should_release_object(self) -> bool:
         return True
 
+    def get_trace_snapshot(self, label: str = "") -> Dict[str, Any]:
+        return {"label": label}
+
+    def score_pose_candidate(self, pose: List[float], kind: str = "") -> Dict[str, Any]:
+        return {}
+
+    def get_grasp_diagnostics(self) -> Dict[str, Any]:
+        return {}
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]

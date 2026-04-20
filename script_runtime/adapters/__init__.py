@@ -1,6 +1,15 @@
 """Adapters for existing SDK, ROS, cameras, and learned modules."""
 
 from .camera_bridge import CameraBridge, CameraSnapshot
+from .fm_grasp_stack import (
+    FMFirstGraspStackAdapter,
+    FoundationPoseEstimator,
+    GraspGenBackend,
+    GraspNetBaselineBackend,
+    GroundedSAM2Grounder,
+    TaskGoalTargetGrounder,
+    build_default_fm_first_grasp_stack,
+)
 from .maniskill_bridge import ManiSkillBridge
 from .perception_adapter import (
     NullPerceptionAdapter,
@@ -18,6 +27,11 @@ __all__ = [
     "CArmSDKBridge",
     "CameraBridge",
     "CameraSnapshot",
+    "FMFirstGraspStackAdapter",
+    "FoundationPoseEstimator",
+    "GraspGenBackend",
+    "GraspNetBaselineBackend",
+    "GroundedSAM2Grounder",
     "LearnedModuleAdapter",
     "ManiSkillBridge",
     "MockSDKBridge",
@@ -31,4 +45,6 @@ __all__ = [
     "RosBridge",
     "RosStatusSnapshot",
     "SDKBridge",
+    "TaskGoalTargetGrounder",
+    "build_default_fm_first_grasp_stack",
 ]
