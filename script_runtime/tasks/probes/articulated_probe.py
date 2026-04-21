@@ -6,6 +6,11 @@ from typing import Any
 
 from script_runtime.core.task_base import ScriptTask
 from script_runtime.executors.pytrees_executor import RecoveryNode, RetryNode, SequenceNode, SkillNode, TimeoutNode
+from script_runtime.tasks.probes.common import (
+    PROBE_EXECUTE_GRASP_TIMEOUT_S,
+    PROBE_GO_PREGRASP_TIMEOUT_S,
+    PROBE_PREPARE_GRIPPER_TIMEOUT_S,
+)
 
 
 class ArticulatedProbeTask(ScriptTask):
@@ -25,18 +30,18 @@ class ArticulatedProbeTask(ScriptTask):
                 TimeoutNode(
                     "articulated_prepare_gripper_timeout",
                     SkillNode("articulated_prepare_gripper_for_grasp", "PrepareGripperForGrasp"),
-                    timeout_s=10.0,
+                    timeout_s=PROBE_PREPARE_GRIPPER_TIMEOUT_S,
                 ),
                 TimeoutNode(
                     "articulated_go_pregrasp_timeout",
                     SkillNode("articulated_go_pregrasp", "GoPregrasp"),
-                    timeout_s=8.0,
+                    timeout_s=PROBE_GO_PREGRASP_TIMEOUT_S,
                 ),
                 SkillNode("articulated_reselect_grasp_after_pregrasp", "ReselectGraspAfterPregrasp"),
                 TimeoutNode(
                     "articulated_grasp_phase_timeout",
                     SkillNode("articulated_execute_grasp_phase", "ExecuteGraspPhase"),
-                    timeout_s=8.0,
+                    timeout_s=PROBE_EXECUTE_GRASP_TIMEOUT_S,
                 ),
                 SkillNode("articulated_check_grasp", "CheckGrasp"),
             ],

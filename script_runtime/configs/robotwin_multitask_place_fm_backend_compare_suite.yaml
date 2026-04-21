@@ -1,0 +1,180 @@
+suite_name: robotwin_multitask_place_fm_backend_compare
+suite_role: fm_compare
+gate: false
+require_isolated: true
+artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare
+default_seeds: [1]
+default_no_video: true
+
+backend_flags_base: &backend_flags_base
+  grounded_sam2: true
+  task_goal_grounder: true
+  foundationpose: true
+  contact_graspnet: false
+  graspnet_baseline: false
+  graspgen: false
+  oracle_pose: true
+  oracle_grasp: true
+  robotwin_depth_pose: true
+  robotwin_depth_grasp: true
+
+contact_graspnet_flags: &contact_graspnet_flags
+  <<: *backend_flags_base
+  contact_graspnet: true
+
+graspnet_baseline_flags: &graspnet_baseline_flags
+  <<: *backend_flags_base
+  graspnet_baseline: true
+
+graspgen_flags: &graspgen_flags
+  <<: *backend_flags_base
+  graspgen: true
+
+fm_compare_stack_common: &fm_compare_stack_common
+  type: fm_first
+  grounded_sam2:
+    model_id: IDEA-Research/grounding-dino-tiny
+    box_threshold: 0.35
+    text_threshold: 0.25
+    max_detections: 8
+    device: cuda
+  foundationpose:
+    python_bin: /home/amax/miniforge-pypy3/envs/script_policy_foundationpose/bin/python
+    timeout_s: 180
+  contact_graspnet:
+    python_bin: /home/amax/miniforge-pypy3/envs/m2diffuser/bin/python
+    timeout_s: 180
+    max_candidates: 12
+  repos:
+    grounded_sam2: third_party/Grounded-SAM-2
+    foundationpose: third_party/FoundationPose
+    contact_graspnet: third_party/contact_graspnet
+    graspnet_baseline: third_party/graspnet-baseline
+    graspgen: third_party/GraspGen
+
+contact_graspnet_overrides: &contact_graspnet_overrides
+  runtime:
+    collect_fm_debug_artifacts: true
+  perception_stack:
+    <<: *fm_compare_stack_common
+    enabled: *contact_graspnet_flags
+
+graspnet_baseline_overrides: &graspnet_baseline_overrides
+  runtime:
+    collect_fm_debug_artifacts: true
+  perception_stack:
+    <<: *fm_compare_stack_common
+    enabled: *graspnet_baseline_flags
+
+graspgen_overrides: &graspgen_overrides
+  runtime:
+    collect_fm_debug_artifacts: true
+  perception_stack:
+    <<: *fm_compare_stack_common
+    enabled: *graspgen_flags
+
+entries:
+  - name: place_empty_cup_contact_graspnet_compare
+    group: healthy5_contact_graspnet
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_empty_cup_robotwin.yaml
+    config_overrides: *contact_graspnet_overrides
+
+  - name: place_empty_cup_graspnet_baseline_compare
+    group: healthy5_graspnet_baseline
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_empty_cup_robotwin.yaml
+    config_overrides: *graspnet_baseline_overrides
+
+  - name: place_empty_cup_graspgen_compare
+    group: healthy5_graspgen
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_empty_cup_robotwin.yaml
+    config_overrides: *graspgen_overrides
+
+  - name: place_mouse_pad_contact_graspnet_compare
+    group: healthy5_contact_graspnet
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_mouse_pad_robotwin.yaml
+    config_overrides: *contact_graspnet_overrides
+
+  - name: place_mouse_pad_graspnet_baseline_compare
+    group: healthy5_graspnet_baseline
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_mouse_pad_robotwin.yaml
+    config_overrides: *graspnet_baseline_overrides
+
+  - name: place_mouse_pad_graspgen_compare
+    group: healthy5_graspgen
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_mouse_pad_robotwin.yaml
+    config_overrides: *graspgen_overrides
+
+  - name: place_phone_stand_contact_graspnet_compare
+    group: healthy5_contact_graspnet
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_phone_stand_robotwin.yaml
+    config_overrides: *contact_graspnet_overrides
+
+  - name: place_phone_stand_graspnet_baseline_compare
+    group: healthy5_graspnet_baseline
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_phone_stand_robotwin.yaml
+    config_overrides: *graspnet_baseline_overrides
+
+  - name: place_phone_stand_graspgen_compare
+    group: healthy5_graspgen
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_phone_stand_robotwin.yaml
+    config_overrides: *graspgen_overrides
+
+  - name: place_shoe_contact_graspnet_compare
+    group: healthy5_contact_graspnet
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_shoe_robotwin.yaml
+    config_overrides: *contact_graspnet_overrides
+
+  - name: place_shoe_graspnet_baseline_compare
+    group: healthy5_graspnet_baseline
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_shoe_robotwin.yaml
+    config_overrides: *graspnet_baseline_overrides
+
+  - name: place_shoe_graspgen_compare
+    group: healthy5_graspgen
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_shoe_robotwin.yaml
+    config_overrides: *graspgen_overrides
+
+  - name: place_object_stand_contact_graspnet_compare
+    group: healthy5_contact_graspnet
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_object_stand_robotwin.yaml
+    config_overrides: *contact_graspnet_overrides
+
+  - name: place_object_stand_graspnet_baseline_compare
+    group: healthy5_graspnet_baseline
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_object_stand_robotwin.yaml
+    config_overrides: *graspnet_baseline_overrides
+
+  - name: place_object_stand_graspgen_compare
+    group: healthy5_graspgen
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_object_stand_robotwin.yaml
+    config_overrides: *graspgen_overrides

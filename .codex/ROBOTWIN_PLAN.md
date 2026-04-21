@@ -6,6 +6,71 @@
 
 ## 2026-04-21 下一阶段推进状态
 
+- 当前最新阶段状态补充：
+  - `healthy5` 的 FM 多 seed 稳定性验证已经完成：
+    - artifact：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare_semantic_bridge_healthy5/`
+    - 本轮新增结果：
+      - `seed=2/3`
+      - `10 runs / 10 runtime success / 10 env success`
+      - `selected_backend_counts = {"contact_graspnet": 10}`
+      - `selected_backend_kind_counts = {"fm_backend": 10}`
+    - 这意味着 FM 第一阶段当前已不只是“抢回主执行”
+      - 而是已经在 healthy `place-only` 的多 seed 面上形成稳定成功面
+    - 因此当前可把后续顺序更新为：
+      1. 继续守住 `place-only` 官方 baseline gate
+      2. 维持 complex probe 第一波推进
+      3. 正式开启 `GraspNetBaseline / GraspGen` 的受控 compare
+  - complex probe 第一波已基于新的 probe timeout 重新复跑：
+    - 当前新增轻量收口：
+      - `script_runtime/tasks/probes/common.py`
+      - probe 家族 timeout 当前固定为：
+        - `PrepareGripperForGrasp = 30s`
+        - `GoPregrasp = 20s`
+        - `ExecuteGraspPhase = 20s`
+    - 目的：
+      - 不让复杂任务 probe 继续被 place-only 的紧 timeout 误伤
+      - 让失败更稳定地落在真实 grasp / follow-up 阶段
+    - 当前汇总 artifact：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_complex_probe/robotwin_multitask_complex_probe_summary.md`
+    - 当前三条 probe 的最新稳定状态：
+      - `place_can_basket`
+        - `final_status = success_mismatch`
+        - `failure_stage = success_mismatch`
+        - `probe_stage = post_place_follow_up`
+        - 已完整跑过 grasp / lift / place，当前首要缺口已前移到 post-place follow-up / success contract
+      - `handover_block`
+        - `failure_stage = grasp_closure`
+        - `probe_stage = source_acquisition`
+        - `failure_node_name = source_execute_grasp_phase`
+        - `message = No planner-feasible next candidate available`
+        - 当前首要缺口已前移到 source grasp closure 与 candidate family 完整性
+      - `open_microwave`
+        - `failure_stage = grasp_closure`
+        - `probe_stage = handle_acquisition`
+        - `failure_node_name = articulated_execute_grasp_phase`
+        - 当前首要缺口已前移到 handle grasp closure，而不是旧版 pregrasp timeout
+  - `GraspNetBaseline / GraspGen` 的受控 compare 当前已正式接上第一条 smoke：
+    - 新增 suite：
+      - `script_runtime/configs/robotwin_multitask_place_fm_backend_compare_suite.yaml`
+    - 当前已完成的最小 compare：
+      - `place_empty_cup_contact_graspnet_compare`
+      - `place_empty_cup_graspnet_baseline_compare`
+      - `place_empty_cup_graspgen_compare`
+    - 当前真实状态：
+      - `contact_graspnet` 已维持 `fm_backend` 主执行成功
+      - `graspnet_baseline` 当前是：
+        - fallback success
+        - `fallback_reason = repo_missing`
+        - `fm_backend_summary.json` 明确显示 backend unavailable
+      - `graspgen` 当前是：
+        - fallback success
+        - `fallback_reason = repo_missing`
+        - `fm_backend_summary.json` 明确显示 backend unavailable
+    - 因此 compare 支线的下一步应先分成两层：
+      1. 先补 `GraspNetBaseline / GraspGen` 的 repo / 环境 readiness
+      2. 再扩到 healthy5 的真实同任务横向 compare
+
 - 当前近端目标已经重新定序，不再围绕单一 hard case 做主线推进，而是同时完成三件事：
   - `place-only` 主线保持稳定
   - 多任务扩展按任务家族推进

@@ -6,6 +6,11 @@ from typing import Any
 
 from script_runtime.core.task_base import ScriptTask
 from script_runtime.executors.pytrees_executor import RecoveryNode, RetryNode, SequenceNode, SkillNode, TimeoutNode
+from script_runtime.tasks.probes.common import (
+    PROBE_EXECUTE_GRASP_TIMEOUT_S,
+    PROBE_GO_PREGRASP_TIMEOUT_S,
+    PROBE_PREPARE_GRIPPER_TIMEOUT_S,
+)
 
 
 class StagedPlaceProbeTask(ScriptTask):
@@ -25,11 +30,19 @@ class StagedPlaceProbeTask(ScriptTask):
                 TimeoutNode(
                     "prepare_gripper_timeout",
                     SkillNode("prepare_gripper_for_grasp", "PrepareGripperForGrasp"),
-                    timeout_s=10.0,
+                    timeout_s=PROBE_PREPARE_GRIPPER_TIMEOUT_S,
                 ),
-                TimeoutNode("go_pregrasp_timeout", SkillNode("go_pregrasp", "GoPregrasp"), timeout_s=8.0),
+                TimeoutNode(
+                    "go_pregrasp_timeout",
+                    SkillNode("go_pregrasp", "GoPregrasp"),
+                    timeout_s=PROBE_GO_PREGRASP_TIMEOUT_S,
+                ),
                 SkillNode("reselect_grasp_after_pregrasp", "ReselectGraspAfterPregrasp"),
-                TimeoutNode("grasp_phase_timeout", SkillNode("execute_grasp_phase", "ExecuteGraspPhase"), timeout_s=8.0),
+                TimeoutNode(
+                    "grasp_phase_timeout",
+                    SkillNode("execute_grasp_phase", "ExecuteGraspPhase"),
+                    timeout_s=PROBE_EXECUTE_GRASP_TIMEOUT_S,
+                ),
                 SkillNode("check_grasp", "CheckGrasp"),
                 SkillNode("lift", "Lift"),
                 SkillNode("check_grasp_after_lift", "CheckGrasp"),

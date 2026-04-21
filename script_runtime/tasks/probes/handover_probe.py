@@ -6,6 +6,11 @@ from typing import Any
 
 from script_runtime.core.task_base import ScriptTask
 from script_runtime.executors.pytrees_executor import RecoveryNode, RetryNode, SequenceNode, SkillNode, TimeoutNode
+from script_runtime.tasks.probes.common import (
+    PROBE_EXECUTE_GRASP_TIMEOUT_S,
+    PROBE_GO_PREGRASP_TIMEOUT_S,
+    PROBE_PREPARE_GRIPPER_TIMEOUT_S,
+)
 
 
 def _grasp_sequence(name_prefix: str) -> SequenceNode:
@@ -15,18 +20,18 @@ def _grasp_sequence(name_prefix: str) -> SequenceNode:
             TimeoutNode(
                 f"{name_prefix}_prepare_gripper_timeout",
                 SkillNode(f"{name_prefix}_prepare_gripper_for_grasp", "PrepareGripperForGrasp"),
-                timeout_s=10.0,
+                timeout_s=PROBE_PREPARE_GRIPPER_TIMEOUT_S,
             ),
             TimeoutNode(
                 f"{name_prefix}_go_pregrasp_timeout",
                 SkillNode(f"{name_prefix}_go_pregrasp", "GoPregrasp"),
-                timeout_s=8.0,
+                timeout_s=PROBE_GO_PREGRASP_TIMEOUT_S,
             ),
             SkillNode(f"{name_prefix}_reselect_grasp_after_pregrasp", "ReselectGraspAfterPregrasp"),
             TimeoutNode(
                 f"{name_prefix}_grasp_phase_timeout",
                 SkillNode(f"{name_prefix}_execute_grasp_phase", "ExecuteGraspPhase"),
-                timeout_s=8.0,
+                timeout_s=PROBE_EXECUTE_GRASP_TIMEOUT_S,
             ),
             SkillNode(f"{name_prefix}_check_grasp", "CheckGrasp"),
             SkillNode(f"{name_prefix}_lift", "Lift"),
