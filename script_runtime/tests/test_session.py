@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import script_runtime.tasks as task_exports
 from script_runtime.adapters import FMFirstGraspStackAdapter, MockSDKBridge
 from script_runtime.core import SkillStatus
 from script_runtime.session import build_pick_place_session
@@ -168,6 +169,79 @@ def test_build_pick_place_session_can_configure_fm_first_grasp_stack(tmp_path: P
     session = build_pick_place_session(config=config, sdk_bridge=MockSDKBridge())
 
     assert isinstance(session.adapters["perception"], FMFirstGraspStackAdapter)
+
+
+def test_build_pick_place_session_routes_staged_place_probe_contract(tmp_path: Path):
+    config = {
+        "task_contract": "staged_place_probe",
+        "runtime": {
+            "task_id": "staged-place-probe",
+            "trace_path": str(tmp_path / "trace.jsonl"),
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        "execution": {"active_source": "policy", "control_owner": "script_runtime"},
+        "task_goal": {"task_name": "place_can_basket", "target_object": "can", "target_surface": "basket"},
+        "scene": {
+            "workspace_ready": True,
+            "tracking_lost": False,
+            "depth_anomaly": False,
+            "detection_confidence": 1.0,
+            "calibration_version": "test",
+            "object_pose": [0.42, -0.04, 0.11, 0.0, 0.0, 0.0, 1.0],
+            "grasp_candidates": [{"pose": [0.42, -0.04, 0.11, 0.0, 0.0, 0.0, 1.0]}],
+        },
+        "gripper": {"open_width": 0.08, "close_width": 0.01, "tau": 10.0},
+        "poses": {
+            "pregrasp_pose": [0.42, -0.04, 0.21, 0.0, 0.0, 0.0, 1.0],
+            "lift_pose": [0.42, -0.04, 0.28, 0.0, 0.0, 0.0, 1.0],
+            "place_pose": [0.25, 0.22, 0.18, 0.0, 0.0, 0.0, 1.0],
+            "place_release_pose": [0.25, 0.22, 0.16, 0.0, 0.0, 0.0, 1.0],
+        },
+    }
+
+    session = build_pick_place_session(config=config, sdk_bridge=MockSDKBridge())
+
+    assert session.task.name == "staged_place_probe"
+    assert session.blackboard.world_state.execution.task_contract == "staged_place_probe"
+
+
+def test_build_pick_place_session_routes_handover_probe_contract(tmp_path: Path):
+    config = {
+        "task_contract": "handover_probe",
+        "runtime": {
+            "task_id": "handover-probe",
+            "trace_path": str(tmp_path / "trace.jsonl"),
+            "artifact_dir": str(tmp_path / "artifacts"),
+        },
+        "execution": {"active_source": "policy", "control_owner": "script_runtime"},
+        "task_goal": {"task_name": "handover_block", "target_object": "box", "target_surface": "target_box"},
+        "scene": {
+            "workspace_ready": True,
+            "tracking_lost": False,
+            "depth_anomaly": False,
+            "detection_confidence": 1.0,
+            "calibration_version": "test",
+            "object_pose": [0.12, 0.08, 0.11, 0.0, 0.0, 0.0, 1.0],
+            "grasp_candidates": [{"pose": [0.12, 0.08, 0.11, 0.0, 0.0, 0.0, 1.0]}],
+        },
+        "gripper": {"open_width": 0.08, "close_width": 0.01, "tau": 10.0},
+        "poses": {
+            "pregrasp_pose": [0.12, 0.08, 0.21, 0.0, 0.0, 0.0, 1.0],
+            "lift_pose": [0.12, 0.08, 0.28, 0.0, 0.0, 0.0, 1.0],
+            "place_pose": [0.0, 0.0, 0.9, 0.0, 1.0, 0.0, 0.0],
+            "place_release_pose": [0.0, 0.0, 0.88, 0.0, 1.0, 0.0, 0.0],
+        },
+    }
+
+    session = build_pick_place_session(config=config, sdk_bridge=MockSDKBridge())
+
+    assert session.task.name == "handover_probe"
+    assert session.blackboard.world_state.execution.task_contract == "handover_probe"
+
+
+def test_task_exports_include_probe_contract_tasks():
+    assert "StagedPlaceProbeTask" in task_exports.__all__
+    assert "HandoverProbeTask" in task_exports.__all__
 
 
 class _SnapshotSDK(MockSDKBridge):

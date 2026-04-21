@@ -1,0 +1,26 @@
+suite_name: robotwin_multitask_canary_compare
+suite_role: canary_compare
+gate: false
+require_isolated: true
+artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_canary_compare
+default_seeds: [2]
+default_no_video: true
+
+entries:
+  - name: place_container_plate_baseline
+    group: canary_compare
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_container_plate_robotwin.yaml
+    canary: true
+    canary_seeds: [2]
+    canary_focus: lift_persistence
+
+  - name: place_container_plate_fm_first
+    group: canary_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_container_plate_robotwin_fm_first.yaml
+    canary: true
+    canary_seeds: [2]
+    canary_focus: lift_persistence

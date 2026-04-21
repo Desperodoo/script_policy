@@ -323,6 +323,36 @@ def test_annotate_task_specific_grasp_candidates_keeps_generic_compatibility_whe
     assert "reference_contact_unavailable_in_current_instance" in annotated[0]["affordance"]["notes"]
 
 
+def test_handover_block_task_specific_contact_family_splits_source_and_receiver_contacts():
+    bridge = RoboTwinBridge(task_name="handover_block", active_arm="left")
+    bridge._object_model_name = lambda: "box"  # type: ignore[method-assign]
+    bridge._object_model_id = lambda: None  # type: ignore[method-assign]
+    bridge._load_object_point_metadata = lambda: {  # type: ignore[method-assign]
+        "contact_description": "",
+        "contact_groups": [],
+    }
+    candidates = [
+        {"variant_label": "contact_0", "contact_point_id": 0, "task_compatibility": "compatible"},
+        {"variant_label": "contact_1", "contact_point_id": 1, "task_compatibility": "compatible"},
+        {"variant_label": "contact_4", "contact_point_id": 4, "task_compatibility": "compatible"},
+        {"variant_label": "contact_5", "contact_point_id": 5, "task_compatibility": "compatible"},
+    ]
+
+    annotated_left = bridge._annotate_task_specific_grasp_candidates(candidates, arm="left")
+    compatibility_left = {item["contact_point_id"]: item["task_compatibility"] for item in annotated_left}
+    assert compatibility_left[0] == "preferred"
+    assert compatibility_left[1] == "preferred"
+    assert compatibility_left[4] == "incompatible"
+    assert compatibility_left[5] == "incompatible"
+
+    annotated_right = bridge._annotate_task_specific_grasp_candidates(candidates, arm="right")
+    compatibility_right = {item["contact_point_id"]: item["task_compatibility"] for item in annotated_right}
+    assert compatibility_right[0] == "incompatible"
+    assert compatibility_right[1] == "incompatible"
+    assert compatibility_right[4] == "preferred"
+    assert compatibility_right[5] == "preferred"
+
+
 def test_build_grasp_candidate_refresh_diagnostic_marks_failure_to_success_flip():
     bridge = RoboTwinBridge(task_name="place_container_plate", active_arm="left")
 

@@ -1,0 +1,31 @@
+suite_name: robotwin_multitask_complex_probe
+suite_role: complex_probe
+gate: false
+require_isolated: true
+artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_complex_probe
+default_seeds: [1]
+default_no_video: true
+
+entries:
+  - name: place_can_basket_probe
+    group: staged_place_probe
+    mode: baseline
+    enabled: true
+    config_path: tasks/place_can_basket_robotwin_probe.yaml
+    task_contract: staged_place_probe
+    probe_type: staged_place
+
+  - name: handover_block_probe
+    group: handover_probe
+    mode: baseline
+    enabled: true
+    config_path: tasks/handover_block_robotwin_probe.yaml
+    task_contract: handover_probe
+    probe_type: handover
+
+  - name: open_microwave_probe
+    group: articulated_probe_backlog
+    mode: baseline
+    enabled: false
+    config_path: tasks/open_microwave_robotwin_probe.yaml
+    deferred_reason: articulated-object probe backlog; do not include in the current near-term platform phase

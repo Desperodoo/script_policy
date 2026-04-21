@@ -1,0 +1,30 @@
+task_contract: handover_probe
+probe_type: handover
+
+runtime:
+  task_id: handover_block_probe
+  trace_path: script_runtime/artifacts/robotwin_handover_block_probe_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_handover_block_probe
+  write_trace: true
+  export_artifacts: true
+
+robotwin:
+  task_name: handover_block
+  task_config: demo_clean
+  seed: 1
+  object_attr: box
+  target_attr: target_box
+  target_functional_point_id: 1
+  object_functional_point_id: 0
+  pregrasp_distance: 0.07
+  place_approach_distance: 0.05
+  place_release_distance: 0.0
+  retreat_distance: 0.08
+  place_constrain: align
+  capture_video: true
+  episode_name: handover_block_probe
+
+task_goal:
+  task_name: handover_block
+  target_object: box
+  target_surface: target_box

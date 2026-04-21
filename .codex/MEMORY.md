@@ -2,6 +2,67 @@
 
 ## 当前项目记忆
 
+- 已新增中文阶段进度报告：
+  - `./.codex/SCRIPT_POLICY_PROGRESS_REPORT_2026-04-21.md`
+- 2026-04-20 平台稳态化续推进：
+  - `handover_block_probe` 已完成第一条“真实 isolated smoke”复验：
+    - artifact：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_complex_probe/runs/robotwin_multitask_complex_probe_handover_block_probe_seed1/`
+    - 当前已确认 source/left handover contact family 语义真正进到 runtime：
+      - `contact_0/1` 维持 `preferred`
+      - `contact_4/5` 维持 `incompatible`
+      - `ReselectGraspAfterPregrasp` 已不再把 `incompatible` contact 晋升成 active candidate
+    - 本轮真实 trace 中：
+      - per-run summary 已恢复为 `top candidate = contact_0`
+      - executed candidate 也保持 `contact_0`
+      - `ReselectGraspAfterPregrasp` 在 handover trace 中表现为：
+        - `reason = no_improved_candidate_to_promote`
+    - 这说明 handover probe 当前主问题已不再是“source 臂抓错 contact family”
+    - 当前稳定失败已收敛为：
+      - `failure_code = TIMEOUT`
+      - `failure_skill = source_prepare_gripper_timeout`
+      - `failure_stage = pregrasp_motion`
+    - 这符合复杂 probe 近期目标：
+      - 先把失败变成稳定、可分类、可解释，而不是追求立即 env success
+  - `place_container_plate` 新一轮 isolated canary compare 已跑完：
+    - suite artifact：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_canary_compare/`
+    - `baseline`：
+      - `selected_backend = oracle_feasibility_first`
+      - `failure_stage = grasp_closure`
+      - markdown summary 中当前可见：
+        - `top candidate = contact_0`
+        - `executed candidate = contact_1`
+    - `fm_first`：
+      - `selected_backend = contact_graspnet`
+      - `selected_backend_kind = fm_backend`
+      - `guided_feasible_families = ["contact_graspnet_guided_c0"]`
+      - `failure_stage = grasp_closure`
+      - markdown summary 中当前可见：
+        - `top candidate = guided_c0`
+        - `executed candidate = guided_c0`
+    - 当前 canary compare 的可确认结论：
+      - baseline 与 fm_first 本轮都没有 env success
+      - 两条线的主失败阶段都还在 grasp side，而不是 place side
+      - `fm_first` 当前不是“报告面没接上”，而是已真实进入统一 summary contract，但执行链会收敛到 candidate exhaustion
+  - 本轮又补了两条平台级治理修口：
+    - `evaluate_robotwin_multitask_suite.py` 现在会在同一 `task_id` 重跑前清理旧 `run_dir` / `run_summary`
+      - 避免新 run 尚未落盘时误读旧 trace / 旧 summary
+    - multi-task summary contract 已新增：
+      - `terminal_failure_code`
+      - `terminal_failure_skill`
+      - `terminal_failure_message`
+      - `terminal_failure_row_index`
+    - 目的：
+      - 保留“最早主失败阶段”用于 cluster / gate
+      - 同时保留“最终把 run 终止掉的最后一步”用于 canary compare
+  - 当前最新验证后，近期三条最该记住的判断更新为：
+    - `handover_block_probe` 已从“contact family 语义没进 runtime”推进到“语义正确，但 retry/timeout 还需继续收口”
+    - `place_container_plate` 当前 baseline 与 fm-first 的共同主矛盾仍在 grasp side
+    - 报告面当前已经足够支撑：
+      - handover probe 的稳定 smoke
+      - canary compare 的 baseline vs fm_first 横向阅读
+
 - 本仓库由 `rl-vla` 迁移而来，初始提交为 `9c4ae99`
 - `script_runtime` 已可在 dry-run 模式运行
 - 核心测试曾在 `carm` 环境中通过：`8 passed`
@@ -842,3 +903,106 @@
     - 先围绕 `seed=2` 的 `contact_graspnet_guided_c0` 执行失败做：
       - execute grasp command / contact geometry / closure 诊断
       - 明确是抓取姿态、接近方向、还是 runtime 执行阶段导致掉抓
+- 2026-04-20 平台稳态化计划已正式落地到主干骨架：
+  - 当前近端北极星已明确改成：
+    - 平台稳态化
+    - 而不是继续围绕单个 hard case 做 case patch
+    - 也不是把某个外部 FM backend 直接硬接成主线
+  - RoboTwin 继续是主验证面
+  - `script_runtime` 继续是执行核心
+  - `arm_control_sdk` 近期只保留接口友好性，不进入近端里程碑
+  - 当前正式 gate 已固定为：
+    - `script_runtime/configs/robotwin_multitask_place_suite.yaml`
+    - runner:
+      - `script_runtime/runners/evaluate_robotwin_multitask_suite.py`
+    - suite role:
+      - `gate`
+    - `require_isolated: true`
+  - 多任务 runner 当前统一 summary contract 已稳定暴露：
+    - `runtime_status`
+    - `final_status`
+    - `failure_stage`
+    - `task_contract`
+    - `suite_role`
+    - `probe_type`
+    - `selected_backend`
+    - `trace_path`
+    - `run_dir`
+    - `summary_path`
+  - 当前 place-only 主线回归集仍固定为 6 个任务：
+    - `place_empty_cup`
+    - `place_mouse_pad`
+    - `place_container_plate`
+    - `place_phone_stand`
+    - `place_shoe`
+    - `place_object_stand`
+  - 当前可信 gate 水位继续记为：
+    - isolated suite `18 runs / 17 env success`
+    - 唯一重点红线：
+      - `place_container_plate seed=2`
+      - `failure_stage=lift_persistence`
+  - `place_container_plate seed=2` 当前已被正式升格为唯一 canary：
+    - suite 内会打：
+      - `canary=true`
+      - `canary_focus=lift_persistence`
+    - 近期默认验收不是 place 后段或 env success
+    - 而是：
+      - 是否把 `lift_persistence` 收敛成 success
+      - 或至少前移成更早、更干净、可解释的 failure stage
+  - FM-first 近期只允许走一条受控接回路线：
+    - compare suite:
+      - `script_runtime/configs/robotwin_multitask_canary_compare_suite.yaml`
+    - 当前只绑定：
+      - `place_container_plate`
+    - 不再横向扩很多 `*_fm_first.yaml`
+    - `Contact-GraspNet` 是第一个优先接回执行链比较面的外部 grasp backend
+    - `FoundationPose` 明确是 side lane，不得阻塞主执行链
+  - 当前复杂任务已从“将来再说”推进为受控 probe：
+    - suite:
+      - `script_runtime/configs/robotwin_multitask_complex_probe_suite.yaml`
+    - probe 1:
+      - `place_can_basket`
+      - contract:
+        - `staged_place_probe`
+    - probe 2:
+      - `handover_block`
+      - contract:
+        - `handover_probe`
+    - `open_microwave` 当前明确只在 backlog，不进入本轮近端施工
+  - `session.py` 当前已经有轻量 task routing：
+    - 默认：
+      - `pick_place`
+    - 新增：
+      - `staged_place_probe`
+      - `handover_probe`
+    - 目的不是设计大而全 schema
+    - 而是先建立稳定 task-family 分流点
+  - 当前复杂任务近期成功标准不是 env success：
+    - 而是能跑到稳定 smoke
+    - 或稳定落在明确 `unsupported_contract / partial-contract failure`
+    - 不接受 opaque exception / 无 trace / 无分类失败
+  - 当前必须记住的治理原则：
+    - 平台里程碑后必须同步回写 `.codex/MEMORY.md` 与 `.codex/ROBOTWIN_PLAN.md`
+    - 记忆连续性本身已经被视为平台能力的一部分
+  - 2026-04-20 晚些时候已完成第一条 complex probe 真实 isolated smoke：
+    - suite：
+      - `script_runtime/configs/robotwin_multitask_complex_probe_suite.yaml`
+    - task：
+      - `place_can_basket_probe`
+    - 产物目录：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_complex_probe/runs/robotwin_multitask_complex_probe_place_can_basket_probe_seed1/`
+    - 当前真实状态：
+      - 已稳定产出 trace / grounding / rollout / refresh history
+      - 当前最早暴露的问题是：
+        - `PrepareGripperForGrasp` timeout
+      - message：
+        - `prepare_gripper_timeout exceeded timeout`
+    - 这次 smoke 同时暴露了一个 runner taxonomy 问题：
+      - 旧版 summary 会把这种 timeout 误记成 `success_mismatch`
+      - 当前已修复为：
+        - trace 无单个 failure row 时，回退读取 `run_result.failure_code`
+        - 并按 timeout node 名称映射回更合理的 stage
+      - 因而后续同类 probe run 应该落到：
+        - `pregrasp_motion`
+      - 而不是：
+        - `success_mismatch`

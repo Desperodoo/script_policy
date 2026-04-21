@@ -209,6 +209,62 @@ def test_reselect_grasp_after_pregrasp_noops_without_flip(blackboard, adapters):
     assert blackboard.get("active_grasp_candidate")["contact_point_id"] == 0
 
 
+def test_reselect_grasp_after_pregrasp_skips_incompatible_improved_candidate(blackboard, adapters):
+    candidates = [
+        {
+            "variant_label": "contact_0",
+            "contact_point_id": 0,
+            "arm": "left",
+            "planner_status": "Success",
+            "planner_waypoint_count": 520,
+            "pose": [0.1, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0],
+            "pregrasp_pose": [0.0, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+            "task_compatibility": "preferred",
+            "score": 1.6,
+        },
+        {
+            "variant_label": "contact_5",
+            "contact_point_id": 5,
+            "arm": "left",
+            "planner_status": "Success",
+            "planner_waypoint_count": 430,
+            "pose": [0.2, 0.0, 0.2, 0.0, 0.0, 0.0, 1.0],
+            "pregrasp_pose": [0.1, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+            "task_compatibility": "incompatible",
+            "score": 1.8,
+        },
+    ]
+    blackboard.update_world(learned={"grasp_candidates": candidates})
+    blackboard.set("grasp_candidates", candidates)
+    blackboard.set("active_grasp_candidate", candidates[0])
+    blackboard.set(
+        "last_grasp_candidate_refresh",
+        {
+            "refresh_reason": "post_GoPregrasp",
+            "improved_candidates": [
+                {
+                    "previous_status": "Failure",
+                    "current_status": "Success",
+                    "current": {
+                        "contact_point_id": 5,
+                        "arm": "left",
+                        "rank": 1,
+                    },
+                }
+            ],
+        },
+    )
+
+    result = ReselectGraspAfterPregrasp().run(
+        SkillContext(blackboard=blackboard, adapters=adapters, task_id="post-pregrasp-skip-incompatible")
+    )
+
+    assert result.status == SkillStatus.SUCCESS
+    assert result.payload["reselected"] is False
+    assert result.payload["reason"] == "no_improved_candidate_to_promote"
+    assert blackboard.get("active_grasp_candidate")["contact_point_id"] == 0
+
+
 def test_reselect_grasp_after_pregrasp_avoids_recent_failed_active_candidate(blackboard, adapters):
     candidates = [
         {

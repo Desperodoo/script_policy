@@ -9,6 +9,7 @@ from script_runtime.skills.checks import (
     CheckSceneReady,
     CheckTaskSuccess,
     ReselectGraspAfterPregrasp,
+    SwitchActiveArm,
     WaitForObjectStable,
 )
 from script_runtime.skills.gripper import ExecuteGraspPhase, GuardedClose, OpenGripper, PrepareGripperForGrasp, ResetGripper
@@ -60,6 +61,7 @@ def build_default_skill_registry() -> SkillRegistry:
             CheckContact(),
             CheckTaskSuccess(),
             ReselectGraspAfterPregrasp(),
+            SwitchActiveArm(),
             GetObjectPose(),
             GetGraspCandidates(),
             ReacquirePerception(),

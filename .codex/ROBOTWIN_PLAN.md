@@ -4,6 +4,50 @@
 
 将 `script_runtime` 的执行层主干迁移到 RoboTwin 仿真环境中，形成新的主验证链。
 
+## 2026-04-20 平台稳态化状态
+
+- 当前近端北极星继续保持为“平台稳态化”，而不是继续围绕单一 case 做孤立 patch。
+- 当前主验证面没有变化：
+  - place-only gate 仍是主线
+  - `place_container_plate seed=2` 仍是唯一 canary
+  - `handover_block` / `place_can_basket` 仍是 complex probe，不计入主 gate KPI
+- 本轮已确认的进展：
+  - `handover_block_probe` 第一条真实 isolated smoke 已完成新一轮复验
+    - 当前 source/left contact family 约束已真实进到 runtime
+    - `ReselectGraspAfterPregrasp` 不再把 `incompatible` handover contact 提升为 active
+    - probe 当前稳定失败已收敛为：
+      - `source_prepare_gripper_timeout`
+      - `failure_stage = pregrasp_motion`
+    - 这说明 handover probe 的近期施工重点应从“继续修 contact family 语义”切到：
+      - retry budget / pregrasp timeout / recovery choreography
+  - `place_container_plate` canary compare 已完成一轮新的 isolated `baseline vs fm_first`
+    - 两条线当前都落在：
+      - `failure_stage = grasp_closure`
+    - `baseline` 当前仍是：
+      - `oracle_feasibility_first`
+    - `fm_first` 当前已真实接回统一报告面：
+      - `selected_backend = contact_graspnet`
+      - `selected_backend_kind = fm_backend`
+      - `guided_feasible_families = ["contact_graspnet_guided_c0"]`
+    - 当前更像“grasp-side exhaustion / closure 仍未收口”，而不是 place 后段问题
+- 本轮新增的治理面能力：
+  - multitask runner 现在会在同一 `task_id` 重跑前清理旧 `run_dir` / `run_summary`
+    - 目的：避免 probe/canary 复跑时被旧 artifacts 污染
+  - multitask summary contract 已新增一组 terminal failure 字段：
+    - `terminal_failure_code`
+    - `terminal_failure_skill`
+    - `terminal_failure_message`
+    - `terminal_failure_row_index`
+  - 目的：
+    - `failure_stage` 继续表达“最早主失败阶段”
+    - `terminal_failure_*` 用于表达“最终把本轮 run 终止掉的最后一步”
+    - 这样 canary compare 可以同时读“cluster 面”和“终止面”
+- 近期施工顺序保持不变，但当前具体焦点已更新为：
+  1. 保住 place-only gate 不退化
+  2. 继续沿 `place_container_plate` 跑 canary compare，而不是扩更多 `*_fm_first.yaml`
+  3. 对 `handover_block_probe`，优先把失败进一步收口成更短、更干净的 retry/timeout failure chain
+  4. 保持 complex probe 的 artifact / summary / taxonomy 完整性
+
 ## 第一阶段
 
 - 建立独立环境
@@ -663,3 +707,122 @@
     - 只对 `place_container_plate` 做 FM-first follow-up
     - 优先看 `seed=2` 是否能把 `lift_persistence` 变成成功
     - 或至少把失败进一步前移/解释清楚
+
+## 2026-04-20 平台稳态化主线收口
+
+- 当前项目级近端方向已经固定：
+  - 北极星是“平台稳态化”
+  - 不是继续围绕单一 case 做局部 patch
+  - 也不是优先把某个外部 FM backend 直接扶成主线
+
+- 当前施工顺序已经固定为：
+  1. 平台门禁固化
+  2. 单个 hard case canary
+  3. FM-first 接回统一报告面
+  4. 复杂任务 probe
+  5. 真机友好接口收口
+
+- 当前正式 gate：
+  - suite:
+    - `script_runtime/configs/robotwin_multitask_place_suite.yaml`
+  - runner:
+    - `script_runtime/runners/evaluate_robotwin_multitask_suite.py`
+  - 规则：
+    - `suite_role=gate`
+    - `gate=true`
+    - `require_isolated=true`
+    - 非隔离模式只允许做诊断
+
+- 当前 gate 成功标准明确固定为：
+  - place-only 基线不退化
+  - 当前可信基线仍是：
+    - isolated `18 runs / 17 env success`
+  - `place_container_plate seed=2` 是唯一重点红线
+  - 复杂任务失败必须可分类、可解释、可复现
+
+- 当前唯一 canary：
+  - 任务：
+    - `place_container_plate`
+  - seed：
+    - `2`
+  - 关注层：
+    - `lift_persistence`
+  - compare suite：
+    - `script_runtime/configs/robotwin_multitask_canary_compare_suite.yaml`
+  - 当前 baseline 与 fm_first 需要共用同一 summary contract
+
+- 当前复杂任务 probe 已正式接入，但不污染 gate：
+  - suite:
+    - `script_runtime/configs/robotwin_multitask_complex_probe_suite.yaml`
+  - `place_can_basket`
+    - 作用：
+      - 暴露 staged place / place 后不立即 release / follow-up grasp semantics contract 缺口
+    - task contract：
+      - `staged_place_probe`
+  - `handover_block`
+    - 作用：
+      - 暴露 dual-arm ownership transfer / synchronized gripper semantics / shared object state contract 缺口
+    - task contract：
+      - `handover_probe`
+  - `open_microwave`
+    - 当前只保留 backlog 身份
+    - 不进入本轮近端施工
+
+- 当前 runtime 架构已新增轻量 `task_contract` 分流点：
+  - 入口：
+    - `script_runtime/session.py`
+  - 现有分流：
+    - `pick_place`
+    - `staged_place_probe`
+    - `handover_probe`
+    - `drawer_open_pick`
+    - `peg_insert`
+  - 当前设计目标不是大一统 schema
+  - 而是先把：
+    - 主线 pick-place
+    - 复杂 probe
+    - backlog contract family
+    稳定拆开
+
+- 当前 FM-first 线路约束已经明确：
+  - 近期只围绕 canary 深入
+  - `Contact-GraspNet` 是第一个优先接回统一执行比较面的外部 grasp backend
+  - `FoundationPose` 继续保留接口，但只作为 compare/inspect side lane
+  - 不允许把 session builder 或 benchmark runner 卡死在 `FoundationPose` readiness 上
+
+- 当前每轮阶段验收的统一产出应该是：
+  - suite summary json
+  - suite summary markdown
+  - run-level trace / artifact dir
+  - `.codex/MEMORY.md` 更新
+  - `.codex/ROBOTWIN_PLAN.md` 更新
+
+- 当前下一步默认顺序：
+  1. 继续维持 place-only gate 不退化
+  2. 只围绕 `place_container_plate seed=2` 做 canary 收敛
+  3. 让 FM-first compare 继续走统一 summary contract
+  4. 把 `place_can_basket` 与 `handover_block` 至少推进到稳定 smoke 或稳定 contract failure
+  5. 在此基础上再考虑 articulated-object probe 与真机联调
+
+- 当前 complex probe 最新真实状态补充：
+  - `place_can_basket_probe`
+    - 已在 isolated suite 下完成第一条真实 smoke
+    - 已稳定产出：
+      - trace
+      - grounding
+      - rollout gif
+      - grasp candidate refresh history
+    - 当前最早失败点不是随机异常，而是：
+      - `PrepareGripperForGrasp` timeout
+    - message：
+      - `prepare_gripper_timeout exceeded timeout`
+    - 这说明 probe 已经进入“可复现、可分类、可解释”的平台验收面
+  - 同轮新增 runner 收口：
+    - 当 trace 没有单个 failure row 时
+    - suite summary 现在会回退读取根 `run_result.failure_code`
+    - `*_timeout exceeded timeout` 也会按 node 名称映射到阶段
+    - 例如：
+      - `prepare_gripper_timeout`
+      - `go_pregrasp_timeout`
+      会归到：
+      - `pregrasp_motion`

@@ -1199,11 +1199,13 @@ class RoboTwinBridge(SDKBridge):
             }
         )
         preferred_reference = self._preferred_contact_point(arm)
-        preferred_family = self._preferred_contact_family(
-            preferred_reference,
-            available_contact_ids=available_contact_ids,
-            metadata=metadata,
-        )
+        preferred_family = self._task_specific_contact_family(arm, available_contact_ids)
+        if not preferred_family:
+            preferred_family = self._preferred_contact_family(
+                preferred_reference,
+                available_contact_ids=available_contact_ids,
+                metadata=metadata,
+            )
         incompatible_ids: set[int] = set()
         if preferred_family:
             incompatible_ids = {contact_id for contact_id in available_contact_ids if contact_id not in preferred_family}
@@ -1234,14 +1236,22 @@ class RoboTwinBridge(SDKBridge):
                 notes_parts.append(f"group={contact_group_index}")
             if preferred_unavailable:
                 notes_parts.append("reference_contact_unavailable_in_current_instance")
+            existing_task_compatibility = str(item.get("task_compatibility", "") or "")
+            if task_compatibility in {"preferred", "incompatible"}:
+                final_task_compatibility = task_compatibility
+            elif existing_task_compatibility:
+                final_task_compatibility = existing_task_compatibility
+            else:
+                final_task_compatibility = task_compatibility
             item["object_model_name"] = model_name
             item["object_model_id"] = model_id
             item["contact_group_index"] = contact_group_index
             item["semantic_reference_contact_id"] = preferred_reference
             item["affordance_type"] = item.get("affordance_type") or affordance_type
             item["functional_role"] = item.get("functional_role") or functional_role
-            item["task_compatibility"] = item.get("task_compatibility") or task_compatibility
-            item["semantic_source"] = item.get("semantic_source") or "robotwin_task_rule"
+            item["task_compatibility"] = final_task_compatibility
+            if final_task_compatibility != existing_task_compatibility or not item.get("semantic_source"):
+                item["semantic_source"] = "robotwin_task_rule"
             item["affordance"] = {
                 **dict(item.get("affordance") or {}),
                 "affordance_type": item["affordance_type"],
@@ -1459,7 +1469,17 @@ class RoboTwinBridge(SDKBridge):
         return "right"
 
     def _preferred_contact_point(self, arm: str) -> int:
+        if self.task_name == "handover_block":
+            return 0 if arm == "left" else 4
         return 2 if arm == "left" else 0
+
+    def _task_specific_contact_family(self, arm: str, available_contact_ids: List[int]) -> set[int]:
+        available = {int(value) for value in available_contact_ids}
+        if self.task_name == "handover_block":
+            source_family = {0, 1, 2, 3}
+            receiver_family = {4, 5, 6, 7}
+            return (source_family if arm == "left" else receiver_family) & available
+        return set()
 
     def _target_functional_pose(self) -> Any | None:
         if self.env is not None and self.target_pose_attr:

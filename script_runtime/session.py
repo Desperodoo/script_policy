@@ -25,8 +25,30 @@ from script_runtime.core import SkillContext, TaskBlackboard, WorldState
 from script_runtime.core.skill_base import clear_pending_refresh_reason, set_pending_refresh_reason
 from script_runtime.executors import TraceRecorder, TreeExecutor
 from script_runtime.factory import build_default_skill_registry
+from script_runtime.tasks import HandoverProbeTask, PegInsertTask, PickPlaceTask, StagedPlaceProbeTask
+from script_runtime.tasks.articulated.drawer_open_pick import DrawerOpenPickTask
 from script_runtime.place import ClosedLoopPlaceModule, HeuristicPlaceModule
-from script_runtime.tasks.pick_place import PickPlaceTask
+
+TASK_NAME_CONTRACT_HINTS = {
+    "handover_block": "handover_probe",
+    "handover_mic": "handover_probe",
+    "open_laptop": "drawer_open_pick",
+    "open_microwave": "drawer_open_pick",
+    "place_can_basket": "staged_place_probe",
+    "place_object_basket": "staged_place_probe",
+}
+TASK_CONTRACT_ALIASES = {
+    "articulated_probe": "drawer_open_pick",
+    "articulated_task": "drawer_open_pick",
+    "handover": "handover_probe",
+    "handover_probe": "handover_probe",
+    "peg_insert": "peg_insert",
+    "pick_place": "pick_place",
+    "pickplace": "pick_place",
+    "place_only": "pick_place",
+    "staged_place": "staged_place_probe",
+    "staged_place_probe": "staged_place_probe",
+}
 
 
 def load_runtime_config(config_path: str | Path) -> Dict[str, Any]:
@@ -35,6 +57,47 @@ def load_runtime_config(config_path: str | Path) -> Dict[str, Any]:
         if path.suffix == ".json":
             return json.load(handle)
         return yaml.safe_load(handle) or {}
+
+
+def normalize_task_contract(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return "pick_place"
+    return TASK_CONTRACT_ALIASES.get(text, text)
+
+
+def resolve_task_contract(config: Dict[str, Any]) -> str:
+    runtime = dict(config.get("runtime") or {})
+    task_goal = dict(config.get("task_goal") or {})
+    robotwin = dict(config.get("robotwin") or {})
+    explicit = (
+        config.get("task_contract")
+        or runtime.get("task_contract")
+        or task_goal.get("task_contract")
+        or robotwin.get("task_contract")
+    )
+    if explicit:
+        return normalize_task_contract(explicit)
+    task_name = str(robotwin.get("task_name") or task_goal.get("task_name") or "").strip()
+    if task_name:
+        return normalize_task_contract(TASK_NAME_CONTRACT_HINTS.get(task_name, "pick_place"))
+    return "pick_place"
+
+
+def build_task_from_config(config: Dict[str, Any]) -> Any:
+    task_goal = dict(config.get("task_goal") or {})
+    contract = resolve_task_contract(config)
+    if contract == "pick_place":
+        return PickPlaceTask(goal=task_goal)
+    if contract == "staged_place_probe":
+        return StagedPlaceProbeTask(goal=task_goal)
+    if contract == "handover_probe":
+        return HandoverProbeTask(goal=task_goal)
+    if contract == "drawer_open_pick":
+        return DrawerOpenPickTask(goal=task_goal)
+    if contract == "peg_insert":
+        return PegInsertTask(goal=task_goal)
+    raise ValueError(f"Unsupported task_contract: {contract}")
 
 
 def seed_pick_place_blackboard(blackboard: TaskBlackboard, config: Dict[str, Any]) -> TaskBlackboard:
@@ -46,6 +109,11 @@ def seed_pick_place_blackboard(blackboard: TaskBlackboard, config: Dict[str, Any
     grasp_semantics = config.get("grasp_semantics", {})
     runtime = config.get("runtime", {})
     robotwin = config.get("robotwin", {})
+    task_contract = resolve_task_contract(config)
+    suite_role = str(runtime.get("suite_role", config.get("suite_role", "")) or "")
+    probe_type = str(runtime.get("probe_type", config.get("probe_type", "")) or "")
+    gate = bool(runtime.get("gate", config.get("gate", False)))
+    canary = bool(runtime.get("canary", config.get("canary", False)))
 
     blackboard.update_world(
         perception={
@@ -66,8 +134,18 @@ def seed_pick_place_blackboard(blackboard: TaskBlackboard, config: Dict[str, Any
             "task_goal": dict(task_goal),
             "active_source": str(execution.get("active_source", "policy")),
             "control_owner": str(execution.get("control_owner", "script_runtime")),
+            "task_contract": task_contract,
+            "suite_role": suite_role,
+            "probe_type": probe_type,
+            "gate": gate,
+            "canary": canary,
         },
     )
+    blackboard.set("task_contract", task_contract)
+    blackboard.set("suite_role", suite_role)
+    blackboard.set("probe_type", probe_type)
+    blackboard.set("is_gate_run", gate)
+    blackboard.set("is_canary_run", canary)
 
     for key in ("home_joints", "reset_joints", "pregrasp_pose", "lift_pose", "place_pose", "retreat_pose"):
         if key in poses:
@@ -205,7 +283,7 @@ def build_pick_place_session(
     seed_pick_place_blackboard(blackboard, config)
 
     runtime = config.get("runtime", {})
-    task = PickPlaceTask(goal=config.get("task_goal", {}))
+    task = build_task_from_config(config)
     registry = registry or build_default_skill_registry()
     trace_path = runtime.get("trace_path")
 
@@ -242,7 +320,7 @@ def build_robotwin_pick_place_session(
     seed_pick_place_blackboard(blackboard, config)
 
     runtime = config.get("runtime", {})
-    task = PickPlaceTask(goal=config.get("task_goal", {}))
+    task = build_task_from_config(config)
     registry = registry or build_default_skill_registry()
     trace_path = runtime.get("trace_path")
     sdk_bridge = _build_robotwin_bridge_from_config(config)

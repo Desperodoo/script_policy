@@ -127,6 +127,9 @@ class ReselectGraspAfterPregrasp(Skill):
             candidate = candidate_by_key.get(key)
             if candidate is None or key == active_key:
                 continue
+            compatibility = str(candidate.get("task_compatibility", "unknown") or "unknown")
+            if compatibility == "incompatible":
+                continue
             if str(candidate.get("planner_status", "Unknown") or "Unknown") != "Success":
                 continue
             improved_rows.append((row, candidate))
@@ -189,6 +192,32 @@ class ReselectGraspAfterPregrasp(Skill):
 
         alternatives.sort(key=_priority)
         return alternatives[0][1]
+
+
+class SwitchActiveArm(Skill):
+    def __init__(self):
+        super().__init__(name="SwitchActiveArm", timeout_s=0.2, failure_code=FailureCode.SDK_ERROR)
+
+    def run(self, context: SkillContext) -> SkillResult:
+        sdk = context.adapters.get("sdk")
+        if sdk is None:
+            return SkillResult.failure(FailureCode.SDK_ERROR, message="SDK adapter unavailable for active-arm switch")
+
+        current = str(
+            context.blackboard.get("active_arm")
+            or getattr(sdk, "active_arm", "")
+            or dict(getattr(sdk, "get_status", lambda: {})() or {}).get("active_arm", "")
+            or "right"
+        ).strip().lower()
+        if current not in {"left", "right"}:
+            current = "right"
+        target = "left" if current == "right" else "right"
+
+        setattr(sdk, "active_arm", target)
+        context.blackboard.set("active_arm", target)
+        context.blackboard.update_world(execution={"active_source": "robotwin"})
+        request_world_refresh(context, sdk, reason="post_SwitchActiveArm")
+        return SkillResult.success(previous_active_arm=current, active_arm=target)
 
 
 class CheckSceneReady(Skill):

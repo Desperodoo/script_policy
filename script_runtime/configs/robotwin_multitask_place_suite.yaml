@@ -1,4 +1,7 @@
 suite_name: robotwin_multitask_place_baseline
+suite_role: gate
+gate: true
+require_isolated: true
 artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_baseline
 default_seeds: [1, 2, 3]
 default_no_video: true
@@ -21,6 +24,9 @@ entries:
     mode: baseline
     enabled: true
     config_path: tasks/place_container_plate_robotwin.yaml
+    canary: true
+    canary_seeds: [2]
+    canary_focus: lift_persistence
 
   - name: place_phone_stand
     group: config_first_place

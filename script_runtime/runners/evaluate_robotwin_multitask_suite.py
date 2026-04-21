@@ -6,6 +6,7 @@ import argparse
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from script_runtime.session import build_robotwin_pick_place_session, load_runtime_config
+from script_runtime.session import build_robotwin_pick_place_session, load_runtime_config, resolve_task_contract
 
 SUPPORTED_MODES = {"baseline", "fm_first"}
 SUCCESS_STAGE = "success"
@@ -51,12 +52,18 @@ REQUIRED_TASK_GOAL_FIELDS = ("task_name", "target_object", "target_surface")
 @dataclass(frozen=True)
 class RunSpec:
     suite_name: str
+    suite_role: str
+    gate: bool
     entry_name: str
     group: str
     mode: str
     config_path: str
     seed: int
     no_video: bool
+    task_contract: str = ""
+    probe_type: str = ""
+    canary: bool = False
+    canary_focus: str = ""
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -180,9 +187,45 @@ def _message_value(run_result: Any | None) -> str:
     return str(getattr(run_result, "message", "") or "")
 
 
+def _failure_code_value(run_result: Any | None) -> str:
+    if run_result is None:
+        return "NONE"
+    failure_code = getattr(run_result, "failure_code", "")
+    if hasattr(failure_code, "value"):
+        return str(failure_code.value or "NONE")
+    return str(failure_code or "NONE")
+
+
+def _timeout_stage(text_blob: str) -> str:
+    lowered = str(text_blob or "").lower()
+    if "prepare_gripper" in lowered or "go_pregrasp" in lowered or "pregrasp" in lowered:
+        return "pregrasp_motion"
+    if "grasp_phase" in lowered or "execute_grasp" in lowered:
+        return "grasp_closure"
+    if any(token in lowered for token in ("place_approach", "place_release", "open_gripper", "retreat", "go_home")):
+        return "place_motion"
+    return UNKNOWN_STAGE
+
+
+def _timeout_skill_name(text_blob: str) -> str:
+    text = str(text_blob or "").strip()
+    marker = " exceeded timeout"
+    if marker not in text:
+        return ""
+    return text.split(marker, 1)[0].strip()
+
+
 def _resolve_suite_name(suite_path: Path, suite_config: Dict[str, Any]) -> str:
     text = str(suite_config.get("suite_name") or "").strip()
     return text or suite_path.stem
+
+
+def _resolve_suite_role(suite_config: Dict[str, Any]) -> str:
+    return str(suite_config.get("suite_role") or "default").strip() or "default"
+
+
+def _suite_requires_isolated(suite_config: Dict[str, Any]) -> bool:
+    return bool(suite_config.get("require_isolated", False))
 
 
 def _resolve_suite_artifact_dir(suite_config: Dict[str, Any], suite_name: str) -> Path:
@@ -267,6 +310,8 @@ def expand_suite_entries(
 ) -> Tuple[List[RunSpec], List[Dict[str, Any]]]:
     suite_file = Path(suite_path)
     suite_name = _resolve_suite_name(suite_file, suite_config)
+    suite_role = _resolve_suite_role(suite_config)
+    suite_gate = bool(suite_config.get("gate", False))
     default_seeds = _ensure_int_list(list(suite_config.get("default_seeds") or []), default=[1, 2, 3])
     default_no_video = bool(suite_config.get("default_no_video", True))
     cli_filters = _split_cli_values(task_filters)
@@ -346,18 +391,29 @@ def expand_suite_entries(
             )
             continue
 
+        task_contract = str(entry.get("task_contract") or resolve_task_contract(config) or "").strip()
+        probe_type = str(entry.get("probe_type") or config.get("probe_type") or dict(config.get("runtime") or {}).get("probe_type") or "").strip()
+        canary_seeds = {int(value) for value in list(entry.get("canary_seeds") or [])}
+        canary_focus = str(entry.get("canary_focus") or "").strip()
         seeds = [int(v) for v in (list(seed_override) if seed_override is not None else entry.get("seeds") or default_seeds)]
         no_video = bool(no_video_override) if no_video_override is not None else bool(entry.get("no_video", default_no_video))
         for seed in seeds:
+            is_canary = bool(entry.get("canary", False)) and (not canary_seeds or int(seed) in canary_seeds)
             run_specs.append(
                 RunSpec(
                     suite_name=suite_name,
+                    suite_role=suite_role,
+                    gate=suite_gate,
                     entry_name=name,
                     group=group,
                     mode=mode,
                     config_path=resolved_config_path,
                     seed=int(seed),
                     no_video=no_video,
+                    task_contract=task_contract,
+                    probe_type=probe_type,
+                    canary=is_canary,
+                    canary_focus=canary_focus,
                 )
             )
     return run_specs, skipped
@@ -386,6 +442,18 @@ def _first_failure_row(rows: Sequence[Dict[str, Any]]) -> Tuple[Optional[int], O
     return None, None
 
 
+def _last_failure_row(rows: Sequence[Dict[str, Any]]) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        if str(row.get("result") or "").upper() == "FAILURE":
+            return index, dict(row)
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
+        if str(row.get("failure_code") or "") not in {"", "NONE"}:
+            return index, dict(row)
+    return None, None
+
+
 def classify_failure_stage(
     rows: Sequence[Dict[str, Any]],
     *,
@@ -400,6 +468,10 @@ def classify_failure_stage(
         return "setup_or_contract"
     if runtime_status == "SUCCESS" and env_success:
         return SUCCESS_STAGE
+    if failure_code == "TIMEOUT" or "timeout" in text_blob:
+        timeout_stage = _timeout_stage(text_blob)
+        if timeout_stage != UNKNOWN_STAGE:
+            return timeout_stage
 
     failure_index, failure_row = _first_failure_row(rows)
     if failure_row is None:
@@ -495,6 +567,7 @@ def extract_run_summary(
     task_goal = dict(config.get("task_goal") or {})
     runtime_status = _status_value(run_result)
     runtime_message = _message_value(run_result)
+    runtime_failure_code = _failure_code_value(run_result)
 
     grasp_rows = _skill_rows(rows, "GetGraspCandidates")
     first_grasp_row = {} if not grasp_rows else grasp_rows[0]
@@ -521,9 +594,22 @@ def extract_run_summary(
     after_delta = dict(after_snapshot.get("object_to_target_center_delta") or {})
 
     failure_index, failure_row = _first_failure_row(rows)
-    failure_code = str((failure_row or {}).get("failure_code") or "NONE")
-    failure_skill = _skill_name(failure_row or {})
-    failure_message = _row_message(failure_row or {}) or runtime_message
+    terminal_failure_index, terminal_failure_row = _last_failure_row(rows)
+    runtime_timeout = runtime_failure_code == "TIMEOUT" or "timeout" in runtime_message.lower()
+    if runtime_timeout:
+        failure_code = "TIMEOUT" if runtime_failure_code in {"", "NONE"} else runtime_failure_code
+        failure_skill = _timeout_skill_name(runtime_message)
+        failure_message = runtime_message
+        terminal_failure_code = failure_code
+        terminal_failure_skill = failure_skill
+        terminal_failure_message = failure_message
+    else:
+        failure_code = str((failure_row or {}).get("failure_code") or runtime_failure_code or "NONE")
+        failure_skill = _skill_name(failure_row or {})
+        failure_message = _row_message(failure_row or {}) or runtime_message
+        terminal_failure_code = str((terminal_failure_row or {}).get("failure_code") or runtime_failure_code or failure_code)
+        terminal_failure_skill = _skill_name(terminal_failure_row or {})
+        terminal_failure_message = _row_message(terminal_failure_row or {}) or runtime_message or failure_message
 
     env_result = dict(task_success_payload.get("env_result") or {})
     env_success = bool(task_success_payload.get("env_success", False) or env_result.get("success", False))
@@ -553,7 +639,13 @@ def extract_run_summary(
 
     return {
         "suite_name": spec.suite_name,
+        "suite_role": spec.suite_role,
+        "gate": bool(spec.gate),
         "group": spec.group,
+        "task_contract": spec.task_contract or resolve_task_contract(config),
+        "probe_type": spec.probe_type,
+        "canary": bool(spec.canary),
+        "canary_focus": spec.canary_focus,
         "task": str(robotwin.get("task_name") or spec.entry_name),
         "entry_name": spec.entry_name,
         "config_path": spec.config_path,
@@ -566,6 +658,10 @@ def extract_run_summary(
         "failure_code": failure_code,
         "failure_skill": failure_skill,
         "failure_stage": failure_stage,
+        "terminal_failure_code": terminal_failure_code,
+        "terminal_failure_skill": terminal_failure_skill,
+        "terminal_failure_message": terminal_failure_message,
+        "terminal_failure_row_index": terminal_failure_index,
         "env_success": env_success,
         "env_result": env_result,
         "active_arm": active_arm,
@@ -612,6 +708,15 @@ def _run_summary_output_path(suite_artifact_dir: Path, task_id: str) -> Path:
     return suite_artifact_dir / "run_summaries" / f"{task_id}.json"
 
 
+def _clear_previous_run_outputs(*, suite_artifact_dir: Path, task_id: str) -> None:
+    run_dir = suite_artifact_dir / "runs" / task_id
+    if run_dir.exists():
+        shutil.rmtree(run_dir, ignore_errors=True)
+    summary_path = _run_summary_output_path(suite_artifact_dir, task_id)
+    if summary_path.exists():
+        summary_path.unlink()
+
+
 def _write_json(path: Path, payload: Dict[str, Any] | List[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -635,11 +740,22 @@ def _prepare_run_config(spec: RunSpec, base_config: Dict[str, Any], suite_artifa
     runtime["artifact_dir"] = str(run_root)
     runtime["write_trace"] = bool(runtime.get("write_trace", True))
     runtime["export_artifacts"] = bool(runtime.get("export_artifacts", True))
+    runtime["suite_role"] = spec.suite_role
+    runtime["gate"] = bool(spec.gate)
+    runtime["canary"] = bool(spec.canary)
+    if spec.probe_type:
+        runtime["probe_type"] = spec.probe_type
+    if spec.task_contract:
+        runtime["task_contract"] = spec.task_contract
     robotwin["seed"] = int(spec.seed)
     if spec.no_video:
         robotwin["capture_video"] = False
     config["runtime"] = runtime
     config["robotwin"] = robotwin
+    if spec.task_contract:
+        config["task_contract"] = spec.task_contract
+    if spec.probe_type:
+        config["probe_type"] = spec.probe_type
     return config
 
 
@@ -651,6 +767,7 @@ def _execute_run_in_process(
     session_builder: Any,
 ) -> Dict[str, Any]:
     task_id = str(dict(config.get("runtime") or {}).get("task_id") or f"{spec.entry_name}_seed{spec.seed}")
+    _clear_previous_run_outputs(suite_artifact_dir=suite_artifact_dir, task_id=task_id)
     runtime_artifacts = {"task_id": task_id, "run_dir": str((suite_artifact_dir / "runs" / task_id))}
     session = None
     run_result = None
@@ -696,6 +813,7 @@ def _execute_run_subprocess(
     task_id = str(dict(config.get("runtime") or {}).get("task_id") or f"{spec.entry_name}_seed{spec.seed}")
     temp_config_path = suite_artifact_dir / "run_configs" / f"{task_id}.json"
     temp_summary_path = suite_artifact_dir / "run_summaries" / f"{task_id}.json"
+    _clear_previous_run_outputs(suite_artifact_dir=suite_artifact_dir, task_id=task_id)
     _write_json(temp_config_path, config)
 
     cmd = [
@@ -769,12 +887,16 @@ def run_suite(
     no_video_override: Optional[bool] = None,
     dry_run: bool = False,
     isolated: bool = False,
+    allow_inprocess: bool = False,
     session_builder: Any = build_robotwin_pick_place_session,
 ) -> Dict[str, Any]:
     suite_file = Path(suite_path)
     suite_name = _resolve_suite_name(suite_file, suite_config)
+    suite_role = _resolve_suite_role(suite_config)
     suite_artifact_dir = _resolve_suite_artifact_dir(suite_config, suite_name)
     suite_artifact_dir.mkdir(parents=True, exist_ok=True)
+    require_isolated = _suite_requires_isolated(suite_config)
+    effective_isolated = bool(isolated or (require_isolated and not allow_inprocess))
 
     run_specs, skipped_entries = expand_suite_entries(
         suite_config,
@@ -791,7 +913,7 @@ def run_suite(
             base_config = config_cache[spec.config_path]
             config = _prepare_run_config(spec, base_config, suite_artifact_dir)
             task_id = str(dict(config.get("runtime") or {}).get("task_id") or f"{spec.entry_name}_seed{spec.seed}")
-            if isolated:
+            if effective_isolated:
                 summary = _execute_run_subprocess(
                     spec=spec,
                     config=config,
@@ -811,6 +933,8 @@ def run_suite(
     aggregate = aggregate_runs(runs, skipped_entries=skipped_entries)
     report = {
         "suite_name": suite_name,
+        "suite_role": suite_role,
+        "gate": bool(suite_config.get("gate", False)),
         "suite_path": str(suite_file.resolve()),
         "artifact_dir": str(suite_artifact_dir.resolve()),
         "default_seeds": list(suite_config.get("default_seeds") or []),
@@ -819,7 +943,9 @@ def run_suite(
         "skipped_entries": skipped_entries,
         "runs": runs,
         "aggregate": aggregate,
-        "isolated": bool(isolated),
+        "require_isolated": require_isolated,
+        "requested_isolated": bool(isolated),
+        "isolated": effective_isolated,
     }
 
     summary_json_path = suite_artifact_dir / f"{suite_name}_summary.json"
@@ -949,8 +1075,11 @@ def build_markdown_report(report: Dict[str, Any]) -> str:
     lines = [
         f"# RoboTwin Multitask Suite: {report.get('suite_name', '')}",
         "",
+        f"- Suite role: `{report.get('suite_role', '')}`",
+        f"- Counts toward gate: `{str(bool(report.get('gate', False))).lower()}`",
         f"- Suite config: `{report.get('suite_path', '')}`",
         f"- Artifact dir: `{report.get('artifact_dir', '')}`",
+        f"- Requires isolated mode: `{str(bool(report.get('require_isolated', False))).lower()}`",
         f"- Isolated subprocess mode: `{str(bool(report.get('isolated', False))).lower()}`",
         f"- Run count: `{aggregate.get('run_count', 0)}`",
         f"- Runtime success count: `{aggregate.get('success_count', 0)}`",
@@ -1017,15 +1146,25 @@ def build_markdown_report(report: Dict[str, Any]) -> str:
     else:
         lines.append("- None.")
 
-    lines.extend(["", "## Per Run", "", "| Task | Seed | Mode | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"])
+    lines.extend(
+        [
+            "",
+            "## Per Run",
+            "",
+            "| Task | Seed | Mode | Contract | Canary | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
     for row in list(report.get("runs") or []):
         top = dict(row.get("top_candidate") or {})
         executed = dict(row.get("executed_candidate") or {})
         lines.append(
-            "| {task} | {seed} | {mode} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
+            "| {task} | {seed} | {mode} | {contract} | {canary} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
                 task=row.get("task", ""),
                 seed=row.get("seed", ""),
                 mode=row.get("mode", ""),
+                contract=row.get("task_contract", ""),
+                canary=str(bool(row.get("canary", False))).lower(),
                 status=row.get("final_status", ""),
                 env_success=str(bool(row.get("env_success", False))).lower(),
                 stage=row.get("failure_stage", ""),
@@ -1050,12 +1189,17 @@ def _run_one_from_cli(args: argparse.Namespace) -> int:
     config = load_runtime_config(config_path)
     spec = RunSpec(
         suite_name=str(args.run_one_suite_name),
+        suite_role=str(dict(config.get("runtime") or {}).get("suite_role") or "default"),
+        gate=bool(dict(config.get("runtime") or {}).get("gate", False)),
         entry_name=str(args.run_one_entry_name),
         group=str(args.run_one_group),
         mode=str(args.run_one_mode),
         config_path=str(args.run_one_config_path),
         seed=int(args.run_one_seed),
         no_video=bool(args.run_one_no_video),
+        task_contract=str(config.get("task_contract") or dict(config.get("runtime") or {}).get("task_contract") or ""),
+        probe_type=str(config.get("probe_type") or dict(config.get("runtime") or {}).get("probe_type") or ""),
+        canary=bool(dict(config.get("runtime") or {}).get("canary", False)),
     )
     suite_artifact_dir = Path(str(dict(config.get("runtime") or {}).get("artifact_dir") or ".")).parent
     summary = _execute_run_in_process(
@@ -1112,6 +1256,11 @@ def main() -> int:
         action="store_true",
         help="Run each suite entry in a fresh Python subprocess to avoid simulator/CUDA state bleed.",
     )
+    parser.add_argument(
+        "--diagnostic-inprocess",
+        action="store_true",
+        help="Allow in-process execution even when the suite config normally forces isolated mode.",
+    )
     args = parser.parse_args()
 
     if args.run_one_config:
@@ -1127,6 +1276,7 @@ def main() -> int:
         no_video_override=True if args.no_video else None,
         dry_run=bool(args.dry_run),
         isolated=bool(args.isolated),
+        allow_inprocess=bool(args.diagnostic_inprocess),
     )
     print(
         json.dumps(

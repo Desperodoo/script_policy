@@ -1,0 +1,30 @@
+task_contract: staged_place_probe
+probe_type: staged_place
+
+runtime:
+  task_id: place_can_basket_probe
+  trace_path: script_runtime/artifacts/robotwin_place_can_basket_probe_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_place_can_basket_probe
+  write_trace: true
+  export_artifacts: true
+
+robotwin:
+  task_name: place_can_basket
+  task_config: demo_clean
+  seed: 1
+  object_attr: can
+  target_attr: basket
+  target_functional_point_id: 0
+  object_functional_point_id: null
+  pregrasp_distance: 0.05
+  place_approach_distance: 0.10
+  place_release_distance: 0.02
+  retreat_distance: 0.08
+  place_constrain: free
+  capture_video: true
+  episode_name: place_can_basket_probe
+
+task_goal:
+  task_name: place_can_basket
+  target_object: can
+  target_surface: basket

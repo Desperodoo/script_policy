@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from script_runtime.runners.evaluate_robotwin_multitask_suite import (
     RunSpec,
+    _clear_previous_run_outputs,
     classify_failure_stage,
     expand_suite_entries,
     extract_run_summary,
@@ -56,6 +57,8 @@ task_goal:
     suite_path = tmp_path / "suite.yaml"
     suite_config = {
         "suite_name": "demo_suite",
+        "suite_role": "gate",
+        "gate": True,
         "default_seeds": [1, 2],
         "default_no_video": True,
         "entries": [
@@ -65,6 +68,8 @@ task_goal:
                 "mode": "baseline",
                 "enabled": True,
                 "config_path": "valid.yaml",
+                "canary": True,
+                "canary_seeds": [2],
             },
             {
                 "name": "task_override",
@@ -74,6 +79,8 @@ task_goal:
                 "config_path": "valid.yaml",
                 "seeds": [7],
                 "no_video": False,
+                "task_contract": "staged_place_probe",
+                "probe_type": "staged_place",
             },
             {
                 "name": "task_disabled",
@@ -100,6 +107,13 @@ task_goal:
         ("task_default", 2, True),
         ("task_override", 7, False),
     ]
+    assert run_specs[0].suite_role == "gate"
+    assert run_specs[0].gate is True
+    assert run_specs[0].task_contract == "pick_place"
+    assert run_specs[0].canary is False
+    assert run_specs[1].canary is True
+    assert run_specs[2].task_contract == "staged_place_probe"
+    assert run_specs[2].probe_type == "staged_place"
     assert {row["name"]: row["status"] for row in skipped} == {
         "task_disabled": "deferred",
         "task_invalid_contract": "unsupported_contract",
@@ -182,16 +196,51 @@ def test_classify_failure_stage_detects_grasp_proposal_grasp_closure_lift_and_su
         == "setup_or_contract"
     )
 
+    assert (
+        classify_failure_stage(
+            [],
+            runtime_status="FAILURE",
+            failure_code="TIMEOUT",
+            env_success=False,
+            message="prepare_gripper_timeout exceeded timeout",
+        )
+        == "pregrasp_motion"
+    )
+
+    assert (
+        classify_failure_stage(
+            [
+                {
+                    "skill_name": "ExecuteGraspPhase",
+                    "result": "FAILURE",
+                    "failure_code": "GRASP_FAIL",
+                    "inputs_summary": {"payload": {"message": "Grasp phase did not secure object"}},
+                }
+            ],
+            runtime_status="FAILURE",
+            failure_code="TIMEOUT",
+            env_success=False,
+            message="source_prepare_gripper_timeout exceeded timeout",
+        )
+        == "pregrasp_motion"
+    )
+
 
 def test_extract_run_summary_handles_optional_fm_first_fields():
     spec = RunSpec(
         suite_name="demo_suite",
+        suite_role="canary_compare",
+        gate=False,
         entry_name="place_container_plate",
         group="regression_existing",
         mode="fm_first",
         config_path="config.yaml",
         seed=2,
         no_video=True,
+        task_contract="pick_place",
+        probe_type="",
+        canary=True,
+        canary_focus="lift_persistence",
     )
     config = {
         "robotwin": {
@@ -254,6 +303,9 @@ def test_extract_run_summary_handles_optional_fm_first_fields():
     )
 
     assert summary["final_status"] == "success"
+    assert summary["suite_role"] == "canary_compare"
+    assert summary["task_contract"] == "pick_place"
+    assert summary["canary"] is True
     assert summary["selected_backend_kind"] == "fm_backend"
     assert summary["guided_feasible_families"] == ["guided_c2"]
     assert summary["template_source_debug"]["source_kind"] == "template_delegate"
@@ -275,6 +327,250 @@ def test_extract_run_summary_handles_optional_fm_first_fields():
 
     assert summary_without_optional["selected_backend_kind"] == ""
     assert summary_without_optional["template_source_debug"] == {}
+
+
+def test_extract_run_summary_falls_back_to_run_result_failure_code_for_timeouts():
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="place_can_basket_probe",
+        group="staged_place_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="staged_place_probe",
+        probe_type="staged_place",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "place_can_basket",
+            "object_attr": "can",
+            "target_attr": "basket",
+            "target_functional_point_id": 0,
+            "object_functional_point_id": 0,
+            "episode_name": "place_can_basket",
+        },
+        "task_goal": {
+            "task_name": "place_can_basket",
+            "target_object": "can",
+            "target_surface": "basket",
+        },
+    }
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(
+            status="FAILURE",
+            message="prepare_gripper_timeout exceeded timeout",
+            failure_code="TIMEOUT",
+        ),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=[],
+    )
+
+    assert summary["failure_code"] == "TIMEOUT"
+    assert summary["failure_stage"] == "pregrasp_motion"
+    assert summary["final_status"] == "failure"
+
+
+def test_extract_run_summary_prefers_runtime_timeout_over_earlier_trace_failure():
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="handover_block_probe",
+        group="handover_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="handover_probe",
+        probe_type="handover",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "handover_block",
+            "object_attr": "box",
+            "target_attr": "target_box",
+            "target_functional_point_id": 1,
+            "object_functional_point_id": 0,
+            "episode_name": "handover_block",
+        },
+        "task_goal": {
+            "task_name": "handover_block",
+            "target_object": "box",
+            "target_surface": "target_box",
+        },
+    }
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(
+            status="FAILURE",
+            message="source_prepare_gripper_timeout exceeded timeout",
+            failure_code="TIMEOUT",
+        ),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=[
+            {
+                "skill_name": "ExecuteGraspPhase",
+                "result": "FAILURE",
+                "failure_code": "GRASP_FAIL",
+                "inputs_summary": {"payload": {"message": "Grasp phase did not secure object"}},
+            }
+        ],
+    )
+
+    assert summary["failure_code"] == "TIMEOUT"
+    assert summary["failure_skill"] == "source_prepare_gripper_timeout"
+    assert summary["message"] == "source_prepare_gripper_timeout exceeded timeout"
+    assert summary["failure_stage"] == "pregrasp_motion"
+
+
+def test_extract_run_summary_infers_timeout_failure_code_from_runtime_message():
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="handover_block_probe",
+        group="handover_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="handover_probe",
+        probe_type="handover",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "handover_block",
+            "object_attr": "box",
+            "target_attr": "target_box",
+            "target_functional_point_id": 1,
+            "object_functional_point_id": 0,
+            "episode_name": "handover_block",
+        },
+        "task_goal": {
+            "task_name": "handover_block",
+            "target_object": "box",
+            "target_surface": "target_box",
+        },
+    }
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(
+            status="FAILURE",
+            message="receiver_go_pregrasp_timeout exceeded timeout",
+        ),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=[],
+    )
+
+    assert summary["failure_code"] == "TIMEOUT"
+    assert summary["failure_skill"] == "receiver_go_pregrasp_timeout"
+    assert summary["failure_stage"] == "pregrasp_motion"
+
+
+def test_extract_run_summary_exposes_terminal_failure_alongside_primary_stage():
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="canary_compare",
+        gate=False,
+        entry_name="place_container_plate_fm_first",
+        group="canary_compare",
+        mode="fm_first",
+        config_path="config.yaml",
+        seed=2,
+        no_video=True,
+        task_contract="pick_place",
+        probe_type="",
+        canary=True,
+        canary_focus="lift_persistence",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "place_container_plate",
+            "object_attr": "cup",
+            "target_attr": "plate",
+            "target_functional_point_id": 0,
+            "object_functional_point_id": 0,
+            "episode_name": "place_container_plate",
+        },
+        "task_goal": {
+            "task_name": "place_container_plate",
+            "target_object": "cup",
+            "target_surface": "plate",
+        },
+    }
+
+    rows = [
+        {
+            "skill_name": "ExecuteGraspPhase",
+            "result": "FAILURE",
+            "failure_code": "GRASP_FAIL",
+            "inputs_summary": {"message": "Grasp phase did not secure object", "payload": {"grasped": False}},
+        },
+        {
+            "skill_name": "RetryWithNextCandidate",
+            "result": "FAILURE",
+            "failure_code": "NO_GRASP_CANDIDATE",
+            "inputs_summary": {"message": "No planner-feasible next candidate available", "payload": {}},
+        },
+    ]
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(
+            status="FAILURE",
+            message="No planner-feasible next candidate available",
+            failure_code="GRASP_FAIL",
+        ),
+        runtime_artifacts={"task_id": "fm-first-seed2", "run_dir": "/tmp/fm-first-seed2"},
+        rows=rows,
+    )
+
+    assert summary["failure_stage"] == "grasp_closure"
+    assert summary["failure_skill"] == "ExecuteGraspPhase"
+    assert summary["terminal_failure_code"] == "NO_GRASP_CANDIDATE"
+    assert summary["terminal_failure_skill"] == "RetryWithNextCandidate"
+    assert summary["terminal_failure_message"] == "No planner-feasible next candidate available"
+    assert summary["terminal_failure_row_index"] == 1
+
+
+def test_run_suite_forces_isolated_for_gate_suites(tmp_path: Path):
+    suite_path = tmp_path / "suite.yaml"
+    valid_cfg = tmp_path / "valid.yaml"
+    valid_cfg.write_text(_valid_task_config("place_empty_cup"), encoding="utf-8")
+
+    suite_config = {
+        "suite_name": "gate_suite",
+        "suite_role": "gate",
+        "gate": True,
+        "require_isolated": True,
+        "artifact_dir": str(tmp_path / "artifacts"),
+        "default_seeds": [1],
+        "default_no_video": True,
+        "entries": [
+            {"name": "task_default", "group": "regression_existing", "mode": "baseline", "enabled": True, "config_path": "valid.yaml"},
+        ],
+    }
+
+    report = run_suite(
+        suite_config,
+        suite_path=suite_path,
+        dry_run=True,
+    )
+
+    assert report["require_isolated"] is True
+    assert report["requested_isolated"] is False
+    assert report["isolated"] is True
 
 
 def test_run_suite_isolates_run_exceptions(tmp_path: Path):
@@ -331,3 +627,18 @@ def test_run_suite_isolates_run_exceptions(tmp_path: Path):
     }
     assert report["aggregate"]["per_task"]["place_empty_cup"]["success_count"] == 1
     assert report["aggregate"]["per_task"]["place_mouse_pad"]["run_count"] == 1
+
+
+def test_clear_previous_run_outputs_removes_stale_run_dir_and_summary(tmp_path: Path):
+    suite_artifact_dir = tmp_path / "artifacts"
+    run_dir = suite_artifact_dir / "runs" / "demo_task"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "stale_trace.jsonl").write_text("old\n", encoding="utf-8")
+    summary_path = suite_artifact_dir / "run_summaries" / "demo_task.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text('{"final_status":"success"}', encoding="utf-8")
+
+    _clear_previous_run_outputs(suite_artifact_dir=suite_artifact_dir, task_id="demo_task")
+
+    assert not run_dir.exists()
+    assert not summary_path.exists()

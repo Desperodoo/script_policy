@@ -6,6 +6,7 @@ from .primitives import (
     CheckSceneReady,
     CheckTaskSuccess,
     ReselectGraspAfterPregrasp,
+    SwitchActiveArm,
     WaitForObjectStable,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "CheckSceneReady",
     "CheckTaskSuccess",
     "ReselectGraspAfterPregrasp",
+    "SwitchActiveArm",
     "WaitForObjectStable",
 ]

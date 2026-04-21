@@ -47,6 +47,11 @@ class ExecutionContextState:
     active_source: str = "policy"
     control_owner: str = "upper_machine"
     task_id: str = ""
+    task_contract: str = "pick_place"
+    suite_role: str = ""
+    probe_type: str = ""
+    gate: bool = False
+    canary: bool = False
 
 
 @dataclass

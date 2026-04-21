@@ -245,3 +245,70 @@ python -m script_runtime.runners.inspect_contact_graspnet_backend --config scrip
   - 但新的 `affordance / task_compatibility / grasp_semantic_report` 已真实写入 trace
   - real-view artifact 也已正常导出
 - 这说明新的语义脚手架已经接入真实 RoboTwin runtime，而不只是停留在单测中
+
+RoboTwin 多任务平台门禁现已正式收口到统一 suite runner：
+
+```bash
+python -m script_runtime.runners.evaluate_robotwin_multitask_suite \
+  --suite script_runtime/configs/robotwin_multitask_place_suite.yaml
+python -m script_runtime.runners.evaluate_robotwin_multitask_suite \
+  --suite script_runtime/configs/robotwin_multitask_canary_compare_suite.yaml
+python -m script_runtime.runners.evaluate_robotwin_multitask_suite \
+  --suite script_runtime/configs/robotwin_multitask_complex_probe_suite.yaml
+```
+
+说明：
+- `robotwin_multitask_place_suite.yaml`
+  - 当前是正式 gate
+  - 默认只认 isolated 子进程模式
+  - 主 KPI 仍是 place-only 基线稳定性
+- `robotwin_multitask_canary_compare_suite.yaml`
+  - 当前只服务于 `place_container_plate seed=2`
+  - baseline 与 FM-first 共用同一 summary / markdown contract
+- `robotwin_multitask_complex_probe_suite.yaml`
+  - 当前只收 `place_can_basket` 与 `handover_block`
+  - 用于暴露 staged place / dual-arm handover contract 缺口
+  - 不计入主线成功率 KPI
+
+常用诊断命令：
+
+```bash
+python -m script_runtime.runners.evaluate_robotwin_multitask_suite \
+  --suite script_runtime/configs/robotwin_multitask_place_suite.yaml \
+  --task-filter container_plate \
+  --isolated
+python -m script_runtime.runners.evaluate_robotwin_multitask_suite \
+  --suite script_runtime/configs/robotwin_multitask_place_suite.yaml \
+  --task-filter container_plate \
+  --diagnostic-inprocess
+python -m script_runtime.runners.evaluate_robotwin_multitask_suite \
+  --suite script_runtime/configs/robotwin_multitask_complex_probe_suite.yaml \
+  --task-filter handover_block \
+  --isolated
+```
+
+说明：
+- suite summary 现在会统一暴露：
+  - `runtime_status`
+  - `final_status`
+  - `failure_stage`
+  - `terminal_failure_code`
+  - `terminal_failure_skill`
+  - `terminal_failure_message`
+  - `terminal_failure_row_index`
+  - `task_contract`
+  - `suite_role`
+  - `probe_type`
+  - `selected_backend`
+  - `trace_path / run_dir / summary_path`
+- 同一 `task_id` 重跑前，runner 会先清理旧 `run_dir / run_summary`
+  - 避免新 run 尚未写完时继续误读旧 artifacts
+- 使用 `--task-filter` 做局部复跑时，suite 级 summary / markdown 会按本次过滤后的 run 集重写
+  - 如果需要完整 suite 统计，必须重新执行整套 suite
+- 非隔离模式仅用于诊断，不应作为正式 benchmark 结果引用
+- 当前复杂任务不要继续隐式塞进 `PickPlaceTask`
+  - 统一通过 `task_contract` 路由
+  - 默认 `pick_place`
+  - probe 任务当前分为：
+    - `staged_place_probe`
+    - `handover_probe`
