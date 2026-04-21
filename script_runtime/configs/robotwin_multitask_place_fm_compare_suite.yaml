@@ -1,0 +1,89 @@
+suite_name: robotwin_multitask_place_fm_compare
+suite_role: fm_compare
+gate: false
+require_isolated: true
+artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare
+default_seeds: [1, 2, 3]
+default_no_video: true
+
+fm_first_overrides: &fm_first_overrides
+  runtime:
+    collect_fm_debug_artifacts: true
+  perception_stack:
+    type: fm_first
+    enabled:
+      grounded_sam2: true
+      task_goal_grounder: true
+      foundationpose: true
+      contact_graspnet: true
+      graspnet_baseline: false
+      graspgen: false
+      oracle_pose: true
+      oracle_grasp: true
+      robotwin_depth_pose: true
+      robotwin_depth_grasp: true
+    grounded_sam2:
+      model_id: IDEA-Research/grounding-dino-tiny
+      box_threshold: 0.35
+      text_threshold: 0.25
+      max_detections: 8
+      device: cuda
+    foundationpose:
+      python_bin: /home/amax/miniforge-pypy3/envs/script_policy_foundationpose/bin/python
+      timeout_s: 180
+    contact_graspnet:
+      python_bin: /home/amax/miniforge-pypy3/envs/m2diffuser/bin/python
+      timeout_s: 180
+      max_candidates: 12
+    repos:
+      grounded_sam2: third_party/Grounded-SAM-2
+      foundationpose: third_party/FoundationPose
+      contact_graspnet: third_party/contact_graspnet
+      graspnet_baseline: third_party/graspnet-baseline
+      graspgen: third_party/GraspGen
+
+entries:
+  - name: place_empty_cup_fm_first
+    group: place_only_fm_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_empty_cup_robotwin.yaml
+    config_overrides: *fm_first_overrides
+
+  - name: place_mouse_pad_fm_first
+    group: place_only_fm_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_mouse_pad_robotwin.yaml
+    config_overrides: *fm_first_overrides
+
+  - name: place_container_plate_fm_first
+    group: place_only_fm_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_container_plate_robotwin.yaml
+    config_overrides: *fm_first_overrides
+    canary: true
+    canary_seeds: [2]
+    canary_focus: reference_compare_only
+
+  - name: place_phone_stand_fm_first
+    group: place_only_fm_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_phone_stand_robotwin.yaml
+    config_overrides: *fm_first_overrides
+
+  - name: place_shoe_fm_first
+    group: place_only_fm_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_shoe_robotwin.yaml
+    config_overrides: *fm_first_overrides
+
+  - name: place_object_stand_fm_first
+    group: place_only_fm_compare
+    mode: fm_first
+    enabled: true
+    config_path: tasks/place_object_stand_robotwin.yaml
+    config_overrides: *fm_first_overrides

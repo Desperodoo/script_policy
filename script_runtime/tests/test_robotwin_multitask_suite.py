@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from script_runtime.runners.evaluate_robotwin_multitask_suite import (
     RunSpec,
     _clear_previous_run_outputs,
+    aggregate_runs,
+    build_markdown_report,
     classify_failure_stage,
     expand_suite_entries,
     extract_run_summary,
@@ -74,13 +76,17 @@ task_goal:
             {
                 "name": "task_override",
                 "group": "config_first_place",
-                "mode": "baseline",
+                "mode": "fm_first",
                 "enabled": True,
                 "config_path": "valid.yaml",
                 "seeds": [7],
                 "no_video": False,
-                "task_contract": "staged_place_probe",
-                "probe_type": "staged_place",
+                "task_contract": "articulated_probe",
+                "probe_type": "articulated",
+                "config_overrides": {
+                    "task_goal": {"task_name": "open_microwave", "target_object": "microwave_handle", "target_surface": "microwave_door"},
+                    "perception_stack": {"type": "fm_first", "enabled": {"contact_graspnet": True}},
+                },
             },
             {
                 "name": "task_disabled",
@@ -112,8 +118,10 @@ task_goal:
     assert run_specs[0].task_contract == "pick_place"
     assert run_specs[0].canary is False
     assert run_specs[1].canary is True
-    assert run_specs[2].task_contract == "staged_place_probe"
-    assert run_specs[2].probe_type == "staged_place"
+    assert run_specs[2].mode == "fm_first"
+    assert run_specs[2].task_contract == "articulated_probe"
+    assert run_specs[2].probe_type == "articulated"
+    assert run_specs[2].config_overrides["perception_stack"]["type"] == "fm_first"
     assert {row["name"]: row["status"] for row in skipped} == {
         "task_disabled": "deferred",
         "task_invalid_contract": "unsupported_contract",
@@ -544,6 +552,56 @@ def test_extract_run_summary_exposes_terminal_failure_alongside_primary_stage():
     assert summary["terminal_failure_row_index"] == 1
 
 
+def test_extract_run_summary_exposes_probe_stage_from_node_name():
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="open_microwave_probe",
+        group="articulated_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="articulated_probe",
+        probe_type="articulated",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "open_microwave",
+            "object_attr": "microwave",
+            "target_attr": "microwave",
+            "target_functional_point_id": 4,
+            "object_functional_point_id": 0,
+            "episode_name": "open_microwave",
+        },
+        "task_goal": {
+            "task_name": "open_microwave",
+            "target_object": "microwave_handle",
+            "target_surface": "microwave_door",
+        },
+    }
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(status="FAILURE", message="target_pose invalid", failure_code="NO_IK"),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=[
+            {
+                "skill_name": "PlaceApproach",
+                "node_name": "articulated_handle_alignment",
+                "result": "FAILURE",
+                "failure_code": "NO_IK",
+                "inputs_summary": {"payload": {"message": "target_pose invalid"}},
+            }
+        ],
+    )
+
+    assert summary["failure_node_name"] == "articulated_handle_alignment"
+    assert summary["probe_stage"] == "pre_open_alignment"
+
+
 def test_run_suite_forces_isolated_for_gate_suites(tmp_path: Path):
     suite_path = tmp_path / "suite.yaml"
     valid_cfg = tmp_path / "valid.yaml"
@@ -642,3 +700,103 @@ def test_clear_previous_run_outputs_removes_stale_run_dir_and_summary(tmp_path: 
 
     assert not run_dir.exists()
     assert not summary_path.exists()
+
+
+def test_aggregate_and_markdown_report_expose_backend_selection_summary():
+    runs = [
+        {
+            "task": "place_empty_cup",
+            "entry_name": "place_empty_cup_fm_first",
+            "seed": 1,
+            "failure_stage": "success_mismatch",
+            "final_status": "success_mismatch",
+            "failure_code": "UNKNOWN",
+            "run_dir": "/tmp/place_empty_cup",
+            "message": "Environment success check failed",
+            "selected_backend": "contact_graspnet",
+            "selected_backend_kind": "fm_backend",
+            "fallback_reason": "",
+            "env_success": False,
+            "mode": "fm_first",
+            "task_contract": "pick_place",
+            "probe_type": "",
+            "canary": False,
+            "top_candidate": {"variant_family": "guided_c2"},
+            "executed_candidate": {"variant_family": "guided_c2"},
+        },
+        {
+            "task": "place_mouse_pad",
+            "entry_name": "place_mouse_pad_fm_first",
+            "seed": 1,
+            "failure_stage": "success",
+            "final_status": "success",
+            "failure_code": "NONE",
+            "run_dir": "/tmp/place_mouse_pad",
+            "message": "pick_place_root complete",
+            "selected_backend": "depth_synthesized",
+            "selected_backend_kind": "fallback_delegate",
+            "fallback_reason": "fallback_selected_over_fm_backend",
+            "env_success": True,
+            "mode": "fm_first",
+            "task_contract": "pick_place",
+            "probe_type": "",
+            "canary": False,
+            "top_candidate": {"variant_family": "contact_1"},
+            "executed_candidate": {"variant_family": "contact_1"},
+        },
+        {
+            "task": "place_phone_stand",
+            "entry_name": "place_phone_stand_fm_first",
+            "seed": 1,
+            "failure_stage": "success",
+            "final_status": "success",
+            "failure_code": "NONE",
+            "run_dir": "/tmp/place_phone_stand",
+            "message": "pick_place_root complete",
+            "selected_backend": "depth_synthesized",
+            "selected_backend_kind": "fallback_delegate",
+            "fallback_reason": "no_runtime_candidates",
+            "env_success": True,
+            "mode": "fm_first",
+            "task_contract": "pick_place",
+            "probe_type": "",
+            "canary": False,
+            "top_candidate": {"variant_family": "contact_0"},
+            "executed_candidate": {"variant_family": "contact_0"},
+        },
+    ]
+
+    aggregate = aggregate_runs(runs, skipped_entries=[])
+
+    assert aggregate["selected_backend_counts"] == {
+        "contact_graspnet": 1,
+        "depth_synthesized": 2,
+    }
+    assert aggregate["selected_backend_kind_counts"] == {
+        "fallback_delegate": 2,
+        "fm_backend": 1,
+    }
+    assert aggregate["fallback_reason_counts"] == {
+        "fallback_selected_over_fm_backend": 1,
+        "no_runtime_candidates": 1,
+    }
+
+    report = {
+        "suite_name": "demo_fm_compare",
+        "suite_role": "fm_compare",
+        "gate": False,
+        "suite_path": "/tmp/demo_suite.yaml",
+        "artifact_dir": "/tmp/demo_artifacts",
+        "require_isolated": True,
+        "isolated": True,
+        "runs": runs,
+        "aggregate": aggregate,
+        "skipped_entries": [],
+    }
+    markdown = build_markdown_report(report)
+
+    assert "## Backend Selection" in markdown
+    assert "| depth_synthesized | 2 |" in markdown
+    assert "| fallback_delegate | 2 |" in markdown
+    assert "- `fallback_selected_over_fm_backend`: `1`" in markdown
+    assert "- `no_runtime_candidates`: `1`" in markdown

@@ -910,6 +910,78 @@ def test_contact_graspnet_runtime_reads_summary_from_out_dir_not_last_cli_arg(tm
     assert Path(result.diagnostics["output_dir"]) == out_dir
 
 
+def test_contact_graspnet_runtime_retries_without_filter_when_strict_zero_grasps(tmp_path, monkeypatch):
+    repo = tmp_path / "contact_graspnet"
+    export_dir = tmp_path / "contact_graspnet"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    backend = ContactGraspNetBackend(repo_path=str(repo), python_bin="/tmp/fake-python")
+    monkeypatch.setattr(fm_grasp_stack_module, "_backend_run_dir", lambda context, backend_name: export_dir)
+    monkeypatch.setattr(
+        backend,
+        "_readiness",
+        lambda: {
+            "available": True,
+            "message": "ready_for_external_run",
+            "resolved_repo_path": str(repo),
+            "preferred_checkpoint_dir": str(repo / "ckpt"),
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        "_export_runtime_input",
+        lambda **kwargs: {"ok": True, "npz_path": str(tmp_path / "input.npz")},
+    )
+
+    commands = []
+
+    def _fake_run(command, **kwargs):
+        commands.append(list(command))
+        out_dir = Path(command[command.index("--out-dir") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        strict_mode = "--filter-grasps" in command
+        summary = {
+            "ok": True,
+            "grasp_group_count": 1,
+            "grasp_total": 0 if strict_mode else 35,
+        }
+        (out_dir / "contact_graspnet_summary.json").write_text(
+            fm_grasp_stack_module.json.dumps(summary),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    def _fake_load_runtime_candidates(**kwargs):
+        output_dir = Path(kwargs["output_dir"])
+        if output_dir.name.endswith("nofilter"):
+            return [
+                {
+                    "pose": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0],
+                    "pregrasp_pose": [0.1, 0.2, 0.4, 0.0, 0.0, 0.0, 1.0],
+                    "arm": "left",
+                    "variant_label": "contact_graspnet_guided_c0",
+                    "planner_status": "Success",
+                    "proposal_backend": "contact_graspnet",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(backend, "_load_runtime_candidates", _fake_load_runtime_candidates)
+
+    result = backend.propose_grasps(PerceptionObservation(task_goal={"target_object": "phone"}))
+
+    assert result.ok is True
+    assert result.message == "runtime_success"
+    assert result.diagnostics["selected_attempt"] == "retry_no_filter"
+    assert Path(result.diagnostics["output_dir"]).name == "contact_graspnet_headless_nofilter"
+    assert len(result.diagnostics["attempts"]) == 2
+    assert "--filter-grasps" in commands[0]
+    assert "--filter-grasps" not in commands[1]
+    assert "--local-regions" in commands[1]
+
+
 def test_contact_graspnet_runtime_builds_template_transfer_candidates(tmp_path, blackboard):
     import numpy as np
 
@@ -938,6 +1010,14 @@ def test_contact_graspnet_runtime_builds_template_transfer_candidates(tmp_path, 
                     "pose": [0.18, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
                     "pregrasp_pose": [0.08, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
                     "planner_status": "Success",
+                    "task_compatibility": "preferred",
+                    "semantic_source": "robotwin_task_rule",
+                    "affordance_type": "rim_grasp",
+                    "affordance": {
+                        "task_compatibility": "preferred",
+                        "affordance_type": "rim_grasp",
+                        "notes": "template_contact_family_preferred",
+                    },
                 }
             ]
 
@@ -985,6 +1065,69 @@ def test_contact_graspnet_runtime_builds_template_transfer_candidates(tmp_path, 
     assert candidates[0]["affordance_type"] == "rim_grasp"
     assert candidates[0]["semantic_source"] == "contact_graspnet_template_transfer"
     assert candidates[0]["semantic_priority"] > 0.5
+    assert candidates[0]["task_compatibility"] == "preferred"
+    assert candidates[0]["template_semantic_source"] == "robotwin_task_rule"
+    assert candidates[0]["affordance"]["task_compatibility"] == "preferred"
+    assert candidates[0]["affordance"]["template_semantic_source"] == "robotwin_task_rule"
+
+
+def test_contact_graspnet_guided_candidates_inherit_template_task_semantics():
+    backend = ContactGraspNetBackend(max_candidates=6)
+
+    class _Actor:
+        def get_contact_point(self, contact_id, mode):
+            assert mode == "list"
+            return {
+                0: [0.3, 0.2, 0.12, 0.0, 0.0, 0.0, 1.0],
+            }[int(contact_id)]
+
+    class _SDK:
+        def _object_actor(self):
+            return _Actor()
+
+        def _object_model_name(self):
+            return "047_mouse"
+
+        def _object_model_id(self):
+            return 0
+
+        def _default_affordance_type_for_object(self):
+            return "body_support"
+
+    guided = backend._build_guided_template_candidates(
+        sdk=_SDK(),
+        templates=[
+            {
+                "variant_label": "contact_0",
+                "contact_point_id": 0,
+                "arm": "right",
+                "pose": [0.18, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
+                "pregrasp_pose": [0.08, 0.0, 0.12, 1.0, 0.0, 0.0, 0.0],
+                "planner_status": "Success",
+                "planner_waypoint_count": 24,
+                "task_compatibility": "preferred",
+                "semantic_source": "robotwin_task_rule",
+                "affordance_type": "body_support",
+                "affordance": {
+                    "task_compatibility": "preferred",
+                    "affordance_type": "body_support",
+                    "notes": "template_contact_family_preferred",
+                },
+            }
+        ],
+        raw_contact_evidence=[
+            {"contact_point": [0.31, 0.20, 0.12], "score": 0.4, "segment_id": "1", "source_index": 0},
+        ],
+        active_arm="right",
+        object_pose=[0.30, 0.20, 0.0, 1.0, 0.0, 0.0, 0.0],
+    )
+
+    assert len(guided) == 1
+    assert guided[0]["variant_label"] == "contact_graspnet_guided_c0"
+    assert guided[0]["task_compatibility"] == "preferred"
+    assert guided[0]["template_semantic_source"] == "robotwin_task_rule"
+    assert guided[0]["affordance"]["task_compatibility"] == "preferred"
+    assert guided[0]["task_semantics_origin"] == "template_contact"
 
 
 def test_delegate_grasp_backend_supports_zero_arg_delegate():

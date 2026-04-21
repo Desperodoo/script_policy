@@ -4,6 +4,244 @@
 
 - 已新增中文阶段进度报告：
   - `./.codex/SCRIPT_POLICY_PROGRESS_REPORT_2026-04-21.md`
+- 2026-04-21 下一阶段大框架已开始落地到主干：
+  - 近端目标已改成三件事并行成立：
+    - `place-only` 主线继续稳定
+    - 多任务扩展按任务家族推进
+    - FM 支线从单点试验改成可比较的上游能力
+  - `place_container_plate seed=2` 已从“唯一重点红线”降级为：
+    - 参考诊断样例
+    - canary compare 仍保留，但不再吞掉主要工程带宽
+  - complex probe 当前第一波正式启用项已经更新为：
+    - `place_can_basket`
+      - `task_contract = staged_place_probe`
+    - `open_microwave`
+      - `task_contract = articulated_probe`
+    - `handover_block`
+      - `task_contract = handover_probe`
+  - 第二波 probe 当前已挂入 suite 但默认关闭：
+    - `place_bread_basket`
+    - `handover_mic`
+    - `open_laptop`
+  - runtime 当前已正式补齐第四类轻量 contract：
+    - `articulated_probe`
+  - `script_runtime/session.py` 当前固定路由为：
+    - `place_can_basket` / `place_bread_basket` -> `staged_place_probe`
+    - `handover_block` / `handover_mic` -> `handover_probe`
+    - `open_microwave` / `open_laptop` -> `articulated_probe`
+  - multitask trace / summary 当前新增了两层关键诊断信息：
+    - trace row 新增 `node_name`
+    - run summary 新增：
+      - `failure_node_name`
+      - `probe_stage`
+      - `terminal_failure_node_name`
+      - `terminal_probe_stage`
+    - 目的：
+      - 不再只看通用 failure stage
+      - 开始能按 `staged_place / handover / articulated` 家族解释失败落点
+  - FM 当前第一阶段实现已开始转向“固定主线 + place-only compare”：
+    - 新增 suite：
+      - `script_runtime/configs/robotwin_multitask_place_fm_compare_suite.yaml`
+    - 当前主线固定为：
+      - `GroundingDINO + GroundedSAM2`
+      - `Contact-GraspNet`
+      - `FoundationPose` 只保留 compare/inspect 身份
+    - `perception_stack.enabled` 现在已支持显式 backend 开关：
+      - `grounded_sam2`
+      - `task_goal_grounder`
+      - `foundationpose`
+      - `contact_graspnet`
+      - `graspnet_baseline`
+      - `graspgen`
+    - 这意味着后面可以正式做：
+      - Contact-GraspNet 主线 compare
+      - GraspNet / GraspGen 的受控横向比较
+  - `evaluate_robotwin_multitask_suite.py` 当前也已补上 FM compare 产物接回：
+    - `config_overrides` 已支持在 suite entry 中覆写 baseline config
+    - `mode = fm_first` 已不再只是标签
+    - suite runner 现在会把 FM inspect 产物接回同一 run dir / summary
+    - summary 当前会稳定暴露：
+      - `task_contract`
+      - `probe_type`
+      - `selected_backend`
+      - `artifact_paths`
+    - FM run 额外会写：
+      - `fm_grasp_inspect.json`
+      - `grounding_overlay.png`
+      - `fm_backend_summary.json`
+  - `robotwin_multitask_place_fm_compare` 已完成一轮新的健康任务首轮 compare：
+    - 任务面：
+      - `place_empty_cup`
+      - `place_mouse_pad`
+      - `place_phone_stand`
+      - `place_shoe`
+      - `place_object_stand`
+    - 当前采用：
+      - `seed=1`
+      - isolated subprocess
+    - 当前真实结果：
+      - `5 runs / 4 runtime success / 4 env success`
+    - 当前最重要的结构性结论：
+      - `place_empty_cup`：
+        - `selected_backend = contact_graspnet`
+        - `selected_backend_kind = fm_backend`
+        - `final_status = success_mismatch`
+      - `place_mouse_pad` / `place_shoe` / `place_object_stand`：
+        - `selected_backend = depth_synthesized`
+        - `selected_backend_kind = fallback_delegate`
+        - `fallback_reason = fallback_selected_over_fm_backend`
+      - `place_phone_stand`：
+        - `selected_backend = depth_synthesized`
+        - `selected_backend_kind = fallback_delegate`
+        - `fallback_reason = no_runtime_candidates`
+    - 这说明：
+      - FM compare 当前已经不是“只接上报告面”
+      - 而是已经暴露出第一条清晰判断：
+        - 健康任务上的成功暂时主要还是由 fallback 撑住
+        - `contact_graspnet` 真正作为主执行 backend 时，还没有出现“明显强于横向 fallback / 可直接扩种子”的信号
+    - 当前阶段结论应收敛为：
+      - 先继续稳固当前 `GroundingDINO + GroundedSAM2 + Contact-GraspNet`
+      - 再考虑继续扩 `GraspNetBaseline` / `GraspGen`
+      - 当前还不适合把“FM 已经不弱于 baseline”写成已完成结论
+  - 2026-04-21 随后已完成一轮 FM 主线语义收口：
+    - 当前已定位到一个具体主问题：
+      - `contact_graspnet_guided_*` / `contact_graspnet_template_*` 候选虽然带有 `template_contact_point_id`
+      - 但没有系统继承 template donor 上已有的任务级语义
+      - 导致在：
+        - `place_mouse_pad`
+        - `place_shoe`
+        - `place_object_stand`
+      这些任务里，FM 候选常常只剩 `compatible`
+      - 而 `depth_synthesized` donor 候选是 `preferred`
+      - 所以 rerank 会把 fallback 顶到最前面
+    - 当前已在 `script_runtime/adapters/fm_grasp_stack.py` 补上：
+      - template donor -> FM candidate 的轻量 task semantics bridge
+      - 覆盖：
+        - `contact_graspnet_guided_*`
+        - `contact_graspnet_template_*`
+        - `contact_graspnet_guided_*_bridge`
+    - 当前真实复验结果：
+      - 汇总 artifact：
+        - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare_semantic_bridge_healthy5/`
+      - 任务面：
+        - `place_empty_cup`
+        - `place_mouse_pad`
+        - `place_phone_stand`
+        - `place_shoe`
+        - `place_object_stand`
+      - 配置面：
+        - `seed=1`
+        - isolated subprocess
+        - `collect_fm_debug_artifacts=false`
+      - 当前结果：
+        - `5 runs / 5 runtime success / 5 env success`
+        - `selected_backend_counts = {"contact_graspnet": 4, "depth_synthesized": 1}`
+        - `selected_backend_kind_counts = {"fm_backend": 4, "fallback_delegate": 1}`
+      - 当前逐任务结论：
+        - `place_empty_cup`：
+          - 已从旧版 `success_mismatch` 收敛为：
+            - `selected_backend = contact_graspnet`
+            - `final_status = success`
+            - top/executed=`contact_graspnet_guided_c0`
+        - `place_mouse_pad`：
+          - 已从旧版 fallback 切回：
+            - `selected_backend = contact_graspnet`
+            - top/executed=`contact_graspnet_guided_c1`
+            - `task_compatibility = preferred`
+        - `place_shoe`：
+          - 已从旧版 fallback 切回：
+            - `selected_backend = contact_graspnet`
+            - top/executed=`contact_graspnet_guided_c1`
+            - `task_compatibility = preferred`
+        - `place_object_stand`：
+          - 已从旧版 fallback 切回：
+            - `selected_backend = contact_graspnet`
+            - top/executed=`contact_graspnet_guided_c0`
+            - `task_compatibility = preferred`
+        - `place_phone_stand`：
+          - 当前仍是唯一健康任务 fallback 样例：
+            - `selected_backend = depth_synthesized`
+            - `fallback_reason = no_runtime_candidates`
+      - 当前新的阶段判断应更新为：
+        - FM 主线不再只是“接上了”
+        - 在健康 `place-only` 任务的 `seed=1` 面上，已经开始真正承担主执行
+        - 当前剩余最明确的健康任务 gap 已从“fallback 经常压过 FM”收敛为：
+          - `place_phone_stand` 的 `contact_graspnet` runtime candidate 缺失
+  - 2026-04-21 随后又完成了 `place_phone_stand` 的 runtime candidate 收口：
+    - 当前已定位：
+      - `place_phone_stand` 在严格 `Contact-GraspNet` headless 参数下：
+        - `local_regions=true`
+        - `filter_grasps=true`
+      - 会出现：
+        - `grasp_group_count = 1`
+        - `grasp_total = 0`
+      - 但对同一份输入，手工复验表明：
+        - 关闭 `filter_grasps` 后可恢复出 `35` 个 grasps
+        - 再进一步关闭 `local_regions` 时可恢复出 `46` 个 grasps
+    - 因此当前并没有把 fallback 伪装成 FM，而是已在 `ContactGraspNetBackend` 正式补上：
+      - strict -> `retry_no_filter` -> `retry_global`
+      的受控零-grasp retry 链
+      - 仅在：
+        - `grasp_group_count > 0`
+        - `grasp_total = 0`
+      的场景触发
+    - 当前真实复验结果：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare_semantic_bridge_phonestand/`
+        - `place_phone_stand seed=1`
+        - 当前已变为：
+          - `selected_backend = contact_graspnet`
+          - `selected_backend_kind = fm_backend`
+          - `final_status = success`
+          - top/executed=`contact_graspnet_guided_c0`
+    - 当前最新健康 5 任务快验汇总：
+      - artifact：
+        - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare_semantic_bridge_healthy5/`
+      - 当前结果：
+        - `5 runs / 5 runtime success / 5 env success`
+        - `selected_backend_counts = {"contact_graspnet": 5}`
+        - `selected_backend_kind_counts = {"fm_backend": 5}`
+      - 这说明当前健康 `place-only` 的 `seed=1` 面上：
+        - `Contact-GraspNet` 已从“局部可用”推进为“5 个健康任务全由 FM backend 主执行成功”
+    - 当前应记住的整体推进判断更新为：
+      - FM 主线近期可以从“先抢回主执行”转到：
+        - 扩更多 seed 验证稳定性
+        - 再进入 `GraspNetBaseline / GraspGen` 比较
+      - 但整体项目节奏仍不能只围绕 FM：
+        - complex probe 第一波
+          - `place_can_basket`
+          - `open_microwave`
+          - `handover_block`
+        - 仍需继续按家族推进
+  - 本轮已完成两条真实轻量验收：
+    - `open_microwave_probe`：
+      - suite：
+        - `robotwin_multitask_complex_probe`
+      - 当前真实结果：
+        - `runtime_status = FAILURE`
+        - `failure_code = TIMEOUT`
+        - `failure_stage = pregrasp_motion`
+        - `probe_stage = handle_acquisition`
+      - 这说明 articulated probe 已不是“配置能展开但没跑”
+      - 而是已经进入：
+        - 可运行
+        - 可分类
+        - 可复现
+        的第一条真实 smoke
+    - `place_empty_cup_fm_first seed=1`：
+      - suite：
+        - `robotwin_multitask_place_fm_compare`
+      - 当前真实结果：
+        - `selected_backend = contact_graspnet`
+        - `selected_backend_kind = fm_backend`
+        - `guided_feasible_families = ["contact_graspnet_guided_c0", "contact_graspnet_guided_c1", "contact_graspnet_guided_c2"]`
+        - `final_status = success_mismatch`
+      - 说明：
+        - FM 主线已经真实进入 place-only 运行面
+        - FM inspect 产物已经接回统一 run summary
+      - 当前 run-level artifact 已包含：
+        - `fm_grasp_inspect.json`
+        - `grounding_overlay.png`
+        - `fm_backend_summary.json`
 - 2026-04-20 平台稳态化续推进：
   - `handover_block_probe` 已完成第一条“真实 isolated smoke”复验：
     - artifact：

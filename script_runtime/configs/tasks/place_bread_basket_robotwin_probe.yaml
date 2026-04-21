@@ -1,0 +1,30 @@
+task_contract: staged_place_probe
+probe_type: staged_place
+
+runtime:
+  task_id: place_bread_basket_probe
+  trace_path: script_runtime/artifacts/robotwin_place_bread_basket_probe_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_place_bread_basket_probe
+  write_trace: true
+  export_artifacts: true
+
+robotwin:
+  task_name: place_bread_basket
+  task_config: demo_clean
+  seed: 1
+  object_attr: bread
+  target_attr: breadbasket
+  target_functional_point_id: 0
+  object_functional_point_id: null
+  pregrasp_distance: 0.07
+  place_approach_distance: 0.12
+  place_release_distance: 0.05
+  retreat_distance: 0.10
+  place_constrain: free
+  capture_video: true
+  episode_name: place_bread_basket_probe
+
+task_goal:
+  task_name: place_bread_basket
+  target_object: bread
+  target_surface: breadbasket

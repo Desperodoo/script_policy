@@ -64,6 +64,33 @@ class RunSpec:
     probe_type: str = ""
     canary: bool = False
     canary_focus: str = ""
+    config_overrides: Dict[str, Any] | None = None
+
+
+ARTIFACT_PATH_FIELDS = (
+    "run_dir",
+    "trace_path",
+    "summary_path",
+    "rollout_gif",
+    "realview_contact_sheet_png",
+    "grounding_json",
+    "grasp_candidate_refresh_history_json",
+    "fm_grasp_inspect_json",
+    "fm_backend_summary_json",
+    "grounding_overlay_png",
+    "components_png",
+    "components_json",
+)
+
+
+def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in dict(override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(dict(merged.get(key) or {}), value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -93,6 +120,10 @@ def _trace_rows(trace_path: Path) -> List[Dict[str, Any]]:
 
 def _skill_name(row: Dict[str, Any]) -> str:
     return str(row.get("skill_name") or row.get("skill") or "")
+
+
+def _node_name(row: Dict[str, Any]) -> str:
+    return str(row.get("node_name") or "")
 
 
 def _skill_rows(rows: Iterable[Dict[str, Any]], skill_name: str) -> List[Dict[str, Any]]:
@@ -170,6 +201,40 @@ def _row_message(row: Dict[str, Any]) -> str:
     if message:
         return str(message)
     return str(row.get("message") or "")
+
+
+def _probe_stage_from_row(task_contract: str, row: Dict[str, Any] | None) -> str:
+    if row is None:
+        return ""
+    node_name = _node_name(row).lower()
+    skill_name = _skill_name(row).lower()
+    contract = str(task_contract or "").strip().lower()
+    if contract == "staged_place_probe":
+        if any(token in node_name for token in ("get_object_pose", "get_grasp_candidates", "prepare_gripper", "go_pregrasp", "grasp_phase", "check_grasp", "lift")):
+            return "object_acquisition"
+        if any(token in node_name for token in ("place_approach", "place_release")):
+            return "staged_place_transfer"
+        if any(token in node_name for token in ("check_contact", "check_task_success")):
+            return "post_place_follow_up"
+    if contract == "handover_probe":
+        if node_name.startswith("source_"):
+            return "source_acquisition"
+        if node_name.startswith("receiver_"):
+            return "receiver_acquisition"
+        if "switch_active_arm_to_receiver" in node_name or "open_source_gripper" in node_name:
+            return "ownership_transfer"
+        if any(token in node_name for token in ("place_approach", "place_release", "open_receiver_gripper", "check_task_success")):
+            return "handover_completion"
+    if contract == "articulated_probe":
+        if any(token in node_name for token in ("get_object_pose", "get_grasp_candidates", "prepare_gripper", "go_pregrasp", "grasp_phase", "check_grasp")):
+            return "handle_acquisition"
+        if "handle_alignment" in node_name:
+            return "pre_open_alignment"
+        if "joint_drive" in node_name or skill_name == "placerelease":
+            return "joint_motion"
+        if any(token in node_name for token in ("contact_check", "open_gripper", "check_task_success")):
+            return "articulated_completion"
+    return ""
 
 
 def _status_value(run_result: Any | None) -> str:
@@ -377,7 +442,10 @@ def expand_suite_entries(
             )
             continue
 
+        entry_overrides = dict(entry.get("config_overrides") or {})
         config = load_runtime_config(config_path)
+        if entry_overrides:
+            config = _deep_merge_dict(config, entry_overrides)
         issues = _contract_issues(config)
         if issues:
             skipped.append(
@@ -414,6 +482,7 @@ def expand_suite_entries(
                     probe_type=probe_type,
                     canary=is_canary,
                     canary_focus=canary_focus,
+                    config_overrides=entry_overrides or None,
                 )
             )
     return run_specs, skipped
@@ -599,16 +668,20 @@ def extract_run_summary(
     if runtime_timeout:
         failure_code = "TIMEOUT" if runtime_failure_code in {"", "NONE"} else runtime_failure_code
         failure_skill = _timeout_skill_name(runtime_message)
+        failure_node_name = _node_name(failure_row or {})
         failure_message = runtime_message
         terminal_failure_code = failure_code
         terminal_failure_skill = failure_skill
+        terminal_failure_node_name = _node_name(terminal_failure_row or {})
         terminal_failure_message = failure_message
     else:
         failure_code = str((failure_row or {}).get("failure_code") or runtime_failure_code or "NONE")
         failure_skill = _skill_name(failure_row or {})
+        failure_node_name = _node_name(failure_row or {})
         failure_message = _row_message(failure_row or {}) or runtime_message
         terminal_failure_code = str((terminal_failure_row or {}).get("failure_code") or runtime_failure_code or failure_code)
         terminal_failure_skill = _skill_name(terminal_failure_row or {})
+        terminal_failure_node_name = _node_name(terminal_failure_row or {})
         terminal_failure_message = _row_message(terminal_failure_row or {}) or runtime_message or failure_message
 
     env_result = dict(task_success_payload.get("env_result") or {})
@@ -629,6 +702,9 @@ def extract_run_summary(
         error_text=error_text,
     )
     final_status = _final_status_for_stage(failure_stage, error_text=trace_failure_text if error_text else "")
+    task_contract = spec.task_contract or resolve_task_contract(config)
+    probe_stage = _probe_stage_from_row(task_contract, failure_row)
+    terminal_probe_stage = _probe_stage_from_row(task_contract, terminal_failure_row)
 
     object_model = (
         str(top_candidate.get("object_model_name") or "")
@@ -637,12 +713,12 @@ def extract_run_summary(
     )
     target_model = str(robotwin.get("target_attr") or task_goal.get("target_surface") or "")
 
-    return {
+    summary = {
         "suite_name": spec.suite_name,
         "suite_role": spec.suite_role,
         "gate": bool(spec.gate),
         "group": spec.group,
-        "task_contract": spec.task_contract or resolve_task_contract(config),
+        "task_contract": task_contract,
         "probe_type": spec.probe_type,
         "canary": bool(spec.canary),
         "canary_focus": spec.canary_focus,
@@ -657,11 +733,15 @@ def extract_run_summary(
         "message": trace_failure_text,
         "failure_code": failure_code,
         "failure_skill": failure_skill,
+        "failure_node_name": failure_node_name,
         "failure_stage": failure_stage,
+        "probe_stage": probe_stage,
         "terminal_failure_code": terminal_failure_code,
         "terminal_failure_skill": terminal_failure_skill,
+        "terminal_failure_node_name": terminal_failure_node_name,
         "terminal_failure_message": terminal_failure_message,
         "terminal_failure_row_index": terminal_failure_index,
+        "terminal_probe_stage": terminal_probe_stage,
         "env_success": env_success,
         "env_result": env_result,
         "active_arm": active_arm,
@@ -702,7 +782,8 @@ def extract_run_summary(
         "traceback": traceback_text,
         "failure_row_index": failure_index,
     }
-
+    summary["artifact_paths"] = _artifact_paths_from_mapping(summary)
+    return summary
 
 def _run_summary_output_path(suite_artifact_dir: Path, task_id: str) -> Path:
     return suite_artifact_dir / "run_summaries" / f"{task_id}.json"
@@ -730,16 +811,139 @@ def _read_run_summary(path: Path) -> Dict[str, Any]:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def _artifact_paths_from_mapping(payload: Dict[str, Any]) -> Dict[str, str]:
+    paths: Dict[str, str] = {}
+    for key in ARTIFACT_PATH_FIELDS:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            paths[key] = value
+    return paths
+
+
+def _fm_backend_diagnostic_brief(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    brief: List[Dict[str, Any]] = []
+    for row in list(rows or []):
+        diagnostics = dict(row.get("diagnostics") or {})
+        brief.append(
+            {
+                "backend_name": str(row.get("backend_name") or ""),
+                "ok": bool(row.get("ok", False)),
+                "available": bool(diagnostics.get("available", row.get("ok", False))),
+                "message": str(row.get("message") or ""),
+            }
+        )
+    return brief
+
+
+def _write_fm_backend_summary(inspect_payload: Dict[str, Any], out_path: Path) -> Dict[str, Any]:
+    grasp_result = dict(inspect_payload.get("grasp_result") or {})
+    grasp_payload = dict(grasp_result.get("payload") or {})
+    target_rows = list(inspect_payload.get("target_grounding_diagnostics") or [])
+    pose_rows = list(inspect_payload.get("object_pose_diagnostics") or [])
+    grasp_rows = list(inspect_payload.get("grasp_candidate_diagnostics") or [])
+    payload = {
+        "task_id": str(inspect_payload.get("task_id") or ""),
+        "selected_backend": str(grasp_payload.get("selected_backend") or ""),
+        "selected_backend_kind": str(grasp_payload.get("selected_backend_kind") or ""),
+        "fallback_reason": str(grasp_payload.get("fallback_reason") or ""),
+        "guided_feasible_families": list(grasp_payload.get("guided_feasible_families") or []),
+        "top_candidate_labels": [
+            str(row.get("variant_label") or "")
+            for row in list(grasp_payload.get("grasp_candidates") or [])[:5]
+        ],
+        "target_grounders": _fm_backend_diagnostic_brief(target_rows),
+        "pose_estimators": _fm_backend_diagnostic_brief(pose_rows),
+        "grasp_backends": _fm_backend_diagnostic_brief(grasp_rows),
+    }
+    _write_json(out_path, payload)
+    return payload
+
+
+def _maybe_collect_fm_compare_artifacts(
+    *,
+    spec: RunSpec,
+    config: Dict[str, Any],
+    suite_artifact_dir: Path,
+) -> Dict[str, Any]:
+    runtime = dict(config.get("runtime") or {})
+    if spec.mode != "fm_first" or not bool(runtime.get("collect_fm_debug_artifacts", True)):
+        return {}
+    task_id = str(runtime.get("task_id") or f"{spec.entry_name}_seed{spec.seed}")
+    temp_config_path = suite_artifact_dir / "run_configs" / f"{task_id}_fm_inspect.json"
+    _write_json(temp_config_path, config)
+    run_dir = Path(str(runtime.get("artifact_dir") or ".")) / task_id
+    inspect_json_path = run_dir / f"{task_id}_fm_grasp_inspect.json"
+    cmd = [
+        sys.executable,
+        "-m",
+        "script_runtime.runners.inspect_fm_grasp_stack",
+        "--config",
+        str(temp_config_path),
+        "--task-id",
+        task_id,
+        "--out",
+        str(inspect_json_path),
+    ]
+    completed = subprocess.run(
+        cmd,
+        cwd=str(Path.cwd()),
+        env=dict(os.environ, PYTHONUNBUFFERED="1"),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    payload: Dict[str, Any] = {}
+    if inspect_json_path.exists():
+        payload["fm_grasp_inspect_json"] = str(inspect_json_path)
+        inspect_payload = _read_run_summary(inspect_json_path)
+        if inspect_payload:
+            visual_outputs = dict(inspect_payload.get("visual_outputs") or {})
+            for key, value in visual_outputs.items():
+                text = str(value or "").strip()
+                if text:
+                    payload[key] = text
+            backend_summary_path = run_dir / f"{task_id}_fm_backend_summary.json"
+            _write_fm_backend_summary(inspect_payload, backend_summary_path)
+            payload["fm_backend_summary_json"] = str(backend_summary_path)
+    if completed.stdout:
+        payload["fm_inspect_stdout_tail"] = completed.stdout[-4000:]
+    if completed.stderr:
+        payload["fm_inspect_stderr_tail"] = completed.stderr[-4000:]
+    if completed.returncode != 0 and not payload.get("fm_grasp_inspect_json"):
+        payload["fm_inspect_error"] = f"inspect_fm_grasp_stack exited with code {completed.returncode}"
+    return payload
+
+
 def _prepare_run_config(spec: RunSpec, base_config: Dict[str, Any], suite_artifact_dir: Path) -> Dict[str, Any]:
     config = copy.deepcopy(base_config)
+    if spec.config_overrides:
+        config = _deep_merge_dict(config, spec.config_overrides)
     runtime = dict(config.get("runtime") or {})
     robotwin = dict(config.get("robotwin") or {})
+    if spec.mode == "fm_first":
+        stack_cfg = dict(config.get("perception_stack") or runtime.get("perception_stack") or {})
+        stack_cfg["type"] = "fm_first"
+        enabled = dict(stack_cfg.get("enabled") or {})
+        enabled.setdefault("grounded_sam2", True)
+        enabled.setdefault("task_goal_grounder", True)
+        enabled.setdefault("foundationpose", True)
+        enabled.setdefault("contact_graspnet", True)
+        enabled.setdefault("graspnet_baseline", False)
+        enabled.setdefault("graspgen", False)
+        enabled.setdefault("oracle_pose", True)
+        enabled.setdefault("oracle_grasp", True)
+        enabled.setdefault("robotwin_depth_pose", True)
+        enabled.setdefault("robotwin_depth_grasp", True)
+        stack_cfg["enabled"] = enabled
+        config["perception_stack"] = stack_cfg
     task_id = f"{spec.suite_name}_{spec.entry_name}_seed{spec.seed}"
     run_root = suite_artifact_dir / "runs"
     runtime["task_id"] = task_id
     runtime["artifact_dir"] = str(run_root)
     runtime["write_trace"] = bool(runtime.get("write_trace", True))
     runtime["export_artifacts"] = bool(runtime.get("export_artifacts", True))
+    runtime["collect_fm_debug_artifacts"] = bool(runtime.get("collect_fm_debug_artifacts", spec.mode == "fm_first"))
     runtime["suite_role"] = spec.suite_role
     runtime["gate"] = bool(spec.gate)
     runtime["canary"] = bool(spec.canary)
@@ -792,7 +996,7 @@ def _execute_run_in_process(
                 session.shutdown()
             except Exception:
                 pass
-    return extract_run_summary(
+    summary = extract_run_summary(
         spec=spec,
         config=config,
         run_result=run_result,
@@ -801,6 +1005,11 @@ def _execute_run_in_process(
         error_type=error_type,
         traceback_text=traceback_text,
     )
+    fm_artifacts = _maybe_collect_fm_compare_artifacts(spec=spec, config=config, suite_artifact_dir=suite_artifact_dir)
+    if fm_artifacts:
+        summary.update(fm_artifacts)
+        summary["artifact_paths"] = _artifact_paths_from_mapping(summary)
+    return summary
 
 
 def _execute_run_subprocess(
@@ -855,6 +1064,10 @@ def _execute_run_subprocess(
     )
     summary = _read_run_summary(temp_summary_path)
     if summary:
+        fm_artifacts = _maybe_collect_fm_compare_artifacts(spec=spec, config=config, suite_artifact_dir=suite_artifact_dir)
+        if fm_artifacts:
+            summary.update(fm_artifacts)
+            summary["artifact_paths"] = _artifact_paths_from_mapping(summary)
         if completed.stdout:
             summary["subprocess_stdout_tail"] = completed.stdout[-4000:]
         if completed.stderr:
@@ -961,6 +1174,9 @@ def aggregate_runs(runs: Sequence[Dict[str, Any]], *, skipped_entries: Sequence[
     stage_counts = Counter()
     task_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     representative_by_stage: Dict[str, Dict[str, Any]] = {}
+    selected_backend_counts = Counter()
+    selected_backend_kind_counts = Counter()
+    fallback_reason_counts = Counter()
     env_success_count = 0
     success_count = 0
 
@@ -978,6 +1194,15 @@ def aggregate_runs(runs: Sequence[Dict[str, Any]], *, skipped_entries: Sequence[
                 "run_dir": row.get("run_dir"),
                 "message": row.get("message"),
             }
+        selected_backend = str(row.get("selected_backend") or "").strip()
+        if selected_backend:
+            selected_backend_counts[selected_backend] += 1
+        selected_backend_kind = str(row.get("selected_backend_kind") or "").strip()
+        if selected_backend_kind:
+            selected_backend_kind_counts[selected_backend_kind] += 1
+        fallback_reason = str(row.get("fallback_reason") or "").strip()
+        if fallback_reason:
+            fallback_reason_counts[fallback_reason] += 1
         if bool(row.get("env_success", False)):
             env_success_count += 1
         if str(row.get("final_status") or "") == "success":
@@ -1059,6 +1284,9 @@ def aggregate_runs(runs: Sequence[Dict[str, Any]], *, skipped_entries: Sequence[
         "success_count": success_count,
         "env_success_count": env_success_count,
         "failure_cluster_counts": dict(sorted(stage_counts.items())),
+        "selected_backend_counts": dict(sorted(selected_backend_counts.items())),
+        "selected_backend_kind_counts": dict(sorted(selected_backend_kind_counts.items())),
+        "fallback_reason_counts": dict(sorted(fallback_reason_counts.items())),
         "representative_runs_by_stage": representative_by_stage,
         "per_task": per_task,
         "fm_first_candidates": fm_first_candidates[:3],
@@ -1070,6 +1298,9 @@ def build_markdown_report(report: Dict[str, Any]) -> str:
     aggregate = dict(report.get("aggregate") or {})
     per_task = dict(aggregate.get("per_task") or {})
     stage_counts = dict(aggregate.get("failure_cluster_counts") or {})
+    selected_backend_counts = dict(aggregate.get("selected_backend_counts") or {})
+    selected_backend_kind_counts = dict(aggregate.get("selected_backend_kind_counts") or {})
+    fallback_reason_counts = dict(aggregate.get("fallback_reason_counts") or {})
     fm_candidates = list(aggregate.get("fm_first_candidates") or [])
     deferred = list(report.get("skipped_entries") or [])
     lines = [
@@ -1101,6 +1332,41 @@ def build_markdown_report(report: Dict[str, Any]) -> str:
                 stage_counts=json.dumps(summary.get("failure_stage_counts", {}), ensure_ascii=False, sort_keys=True),
             )
         )
+    lines.extend(
+        [
+            "",
+            "## Backend Selection",
+            "",
+            "| Selected Backend | Count |",
+            "| --- | --- |",
+        ]
+    )
+    if selected_backend_counts:
+        for backend, count in sorted(selected_backend_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            lines.append(f"| {backend} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "| Backend Kind | Count |",
+            "| --- | --- |",
+        ]
+    )
+    if selected_backend_kind_counts:
+        for kind, count in sorted(selected_backend_kind_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            lines.append(f"| {kind} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(["", "Fallback reasons:"])
+    if fallback_reason_counts:
+        for reason, count in sorted(fallback_reason_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
+            lines.append(f"- `{reason}`: `{count}`")
+    else:
+        lines.append("- None.")
+
     lines.extend(
         [
             "",
@@ -1151,19 +1417,22 @@ def build_markdown_report(report: Dict[str, Any]) -> str:
             "",
             "## Per Run",
             "",
-            "| Task | Seed | Mode | Contract | Canary | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Task | Seed | Mode | Contract | Probe Type | Probe Stage | Backend | Canary | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in list(report.get("runs") or []):
         top = dict(row.get("top_candidate") or {})
         executed = dict(row.get("executed_candidate") or {})
         lines.append(
-            "| {task} | {seed} | {mode} | {contract} | {canary} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
+            "| {task} | {seed} | {mode} | {contract} | {probe_type} | {probe_stage} | {backend} | {canary} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
                 task=row.get("task", ""),
                 seed=row.get("seed", ""),
                 mode=row.get("mode", ""),
                 contract=row.get("task_contract", ""),
+                probe_type=row.get("probe_type", ""),
+                probe_stage=row.get("probe_stage", ""),
+                backend=row.get("selected_backend", ""),
                 canary=str(bool(row.get("canary", False))).lower(),
                 status=row.get("final_status", ""),
                 env_success=str(bool(row.get("env_success", False))).lower(),

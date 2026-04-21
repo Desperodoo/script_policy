@@ -68,6 +68,7 @@ class TraceEvent:
     task_id: str
     skill_name: str
     result: str
+    node_name: str = ""
     failure_code: str = FailureCode.NONE.value
     duration_s: float = 0.0
     retry_count: int = 0

@@ -2175,6 +2175,70 @@ class ContactGraspNetBackend(GraspProposalBackend):
         self.template_delegate = template_delegate
         self.last_template_source_debug: Dict[str, Any] = {}
 
+    @staticmethod
+    def _needs_relaxed_retry(summary: Dict[str, Any] | None) -> bool:
+        payload = dict(summary or {})
+        return int(payload.get("grasp_group_count") or 0) > 0 and int(payload.get("grasp_total") or 0) <= 0
+
+    def _run_headless_attempt(
+        self,
+        *,
+        readiness: Dict[str, Any],
+        export_outputs: Dict[str, Any],
+        output_dir: Path,
+        local_regions: bool,
+        filter_grasps: bool,
+        label: str,
+    ) -> Dict[str, Any]:
+        command = self._build_command(
+            repo_path=str(readiness.get("resolved_repo_path") or ""),
+            npz_path=str(export_outputs.get("npz_path") or ""),
+            ckpt_dir=str(readiness.get("preferred_checkpoint_dir") or ""),
+            out_dir=str(output_dir),
+            local_regions=local_regions,
+            filter_grasps=filter_grasps,
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(readiness.get("resolved_repo_path") or "") or None,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+                check=False,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "label": label,
+                "local_regions": bool(local_regions),
+                "filter_grasps": bool(filter_grasps),
+                "command": command,
+                "output_dir": str(output_dir),
+                "exception": repr(exc),
+            }
+
+        summary_path = output_dir / "contact_graspnet_summary.json"
+        summary: Dict[str, Any] = {}
+        if summary_path.is_file():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                summary = {}
+        return {
+            "ok": completed.returncode == 0 and summary_path.is_file(),
+            "label": label,
+            "local_regions": bool(local_regions),
+            "filter_grasps": bool(filter_grasps),
+            "command": command,
+            "output_dir": str(output_dir),
+            "summary_path": str(summary_path),
+            "summary": summary,
+            "returncode": int(completed.returncode),
+            "stdout_tail": (completed.stdout or "")[-4000:],
+            "stderr_tail": (completed.stderr or "")[-4000:],
+        }
+
     def is_available(self) -> bool:
         readiness = self._readiness()
         return bool(readiness.get("available", False))
@@ -2206,55 +2270,83 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 message=str(export_outputs.get("message", "export_failed")),
                 diagnostics={**readiness, "python_bin": self.python_bin, "export_outputs": export_outputs},
             )
-        output_dir = export_dir / "contact_graspnet_headless"
-        command = self._build_command(
-            repo_path=str(readiness.get("resolved_repo_path") or ""),
-            npz_path=str(export_outputs.get("npz_path") or ""),
-            ckpt_dir=str(readiness.get("preferred_checkpoint_dir") or ""),
-            out_dir=str(output_dir),
-        )
-        try:
-            result = subprocess.run(
-                command,
-                cwd=str(readiness.get("resolved_repo_path") or "") or None,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_s,
-                check=False,
+        attempt_plan = [
+            {
+                "label": "strict",
+                "output_dir": export_dir / "contact_graspnet_headless",
+                "local_regions": True,
+                "filter_grasps": True,
+            },
+            {
+                "label": "retry_no_filter",
+                "output_dir": export_dir / "contact_graspnet_headless_nofilter",
+                "local_regions": True,
+                "filter_grasps": False,
+            },
+            {
+                "label": "retry_global",
+                "output_dir": export_dir / "contact_graspnet_headless_global",
+                "local_regions": False,
+                "filter_grasps": False,
+            },
+        ]
+        attempts: List[Dict[str, Any]] = []
+        selected_attempt: Dict[str, Any] | None = None
+        for index, attempt_cfg in enumerate(attempt_plan):
+            attempt = self._run_headless_attempt(
+                readiness=readiness,
+                export_outputs=export_outputs,
+                output_dir=Path(attempt_cfg["output_dir"]),
+                local_regions=bool(attempt_cfg["local_regions"]),
+                filter_grasps=bool(attempt_cfg["filter_grasps"]),
+                label=str(attempt_cfg["label"]),
             )
-        except Exception as exc:
+            attempts.append(
+                {
+                    "label": attempt.get("label"),
+                    "local_regions": attempt.get("local_regions"),
+                    "filter_grasps": attempt.get("filter_grasps"),
+                    "returncode": attempt.get("returncode"),
+                    "summary_path": attempt.get("summary_path"),
+                    "output_dir": attempt.get("output_dir"),
+                    "grasp_group_count": int(dict(attempt.get("summary") or {}).get("grasp_group_count") or 0),
+                    "grasp_total": int(dict(attempt.get("summary") or {}).get("grasp_total") or 0),
+                }
+            )
+            selected_attempt = attempt
+            if not attempt.get("ok", False):
+                break
+            if index == 0 and self._needs_relaxed_retry(dict(attempt.get("summary") or {})):
+                continue
+            if index == 1 and self._needs_relaxed_retry(dict(attempt.get("summary") or {})):
+                continue
+            break
+
+        selected_attempt = dict(selected_attempt or {})
+        if not selected_attempt.get("ok", False):
             return BackendResult(
                 backend_name=self.name,
                 available=True,
                 ok=False,
-                message="subprocess_error",
+                message="runtime_failed" if int(selected_attempt.get("returncode", -1)) != 0 else "summary_missing",
                 diagnostics={
                     **readiness,
                     "python_bin": self.python_bin,
                     "export_outputs": export_outputs,
-                    "command": command,
-                    "exception": repr(exc),
+                    "command": selected_attempt.get("command"),
+                    "returncode": int(selected_attempt.get("returncode", -1)),
+                    "stdout_tail": str(selected_attempt.get("stdout_tail") or ""),
+                    "stderr_tail": str(selected_attempt.get("stderr_tail") or ""),
+                    "attempts": attempts,
+                    "selected_attempt": selected_attempt.get("label"),
+                    "exception": selected_attempt.get("exception"),
                 },
             )
-        summary_path = output_dir / "contact_graspnet_summary.json"
-        if result.returncode != 0 or not summary_path.is_file():
-            return BackendResult(
-                backend_name=self.name,
-                available=True,
-                ok=False,
-                message="runtime_failed" if result.returncode != 0 else "summary_missing",
-                diagnostics={
-                    **readiness,
-                    "python_bin": self.python_bin,
-                    "export_outputs": export_outputs,
-                    "command": command,
-                    "returncode": int(result.returncode),
-                    "stdout_tail": (result.stdout or "")[-4000:],
-                    "stderr_tail": (result.stderr or "")[-4000:],
-                },
-            )
+
+        output_dir = Path(str(selected_attempt.get("output_dir") or ""))
+        summary_path = Path(str(selected_attempt.get("summary_path") or ""))
+        summary = dict(selected_attempt.get("summary") or {})
         try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
             candidates = self._load_runtime_candidates(
                 output_dir=output_dir,
                 observation=observation,
@@ -2271,11 +2363,13 @@ class ContactGraspNetBackend(GraspProposalBackend):
                     **readiness,
                     "python_bin": self.python_bin,
                     "export_outputs": export_outputs,
-                    "command": command,
-                    "returncode": int(result.returncode),
-                    "stdout_tail": (result.stdout or "")[-4000:],
-                    "stderr_tail": (result.stderr or "")[-4000:],
+                    "command": selected_attempt.get("command"),
+                    "returncode": int(selected_attempt.get("returncode", -1)),
+                    "stdout_tail": str(selected_attempt.get("stdout_tail") or ""),
+                    "stderr_tail": str(selected_attempt.get("stderr_tail") or ""),
                     "summary_path": str(summary_path),
+                    "attempts": attempts,
+                    "selected_attempt": selected_attempt.get("label"),
                     "exception": repr(exc),
                 },
             )
@@ -2290,9 +2384,12 @@ class ContactGraspNetBackend(GraspProposalBackend):
                     "python_bin": self.python_bin,
                     "summary": summary,
                     "summary_path": str(summary_path),
-                    "command": command,
-                    "stdout_tail": (result.stdout or "")[-4000:],
-                    "stderr_tail": (result.stderr or "")[-4000:],
+                    "output_dir": str(output_dir),
+                    "command": selected_attempt.get("command"),
+                    "stdout_tail": str(selected_attempt.get("stdout_tail") or ""),
+                    "stderr_tail": str(selected_attempt.get("stderr_tail") or ""),
+                    "attempts": attempts,
+                    "selected_attempt": selected_attempt.get("label"),
                 },
             )
         return BackendResult(
@@ -2308,9 +2405,11 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 "summary": summary,
                 "summary_path": str(summary_path),
                 "output_dir": str(output_dir),
-                "command": command,
-                "stdout_tail": (result.stdout or "")[-4000:],
-                "stderr_tail": (result.stderr or "")[-4000:],
+                "command": selected_attempt.get("command"),
+                "stdout_tail": str(selected_attempt.get("stdout_tail") or ""),
+                "stderr_tail": str(selected_attempt.get("stderr_tail") or ""),
+                "attempts": attempts,
+                "selected_attempt": selected_attempt.get("label"),
                 "candidate_count": len(candidates),
                 "selected_backend": self.name,
             },
@@ -2422,9 +2521,18 @@ class ContactGraspNetBackend(GraspProposalBackend):
             "segmap_foreground_pixels": int(np.count_nonzero(segmap)),
         }
 
-    def _build_command(self, *, repo_path: str, npz_path: str, ckpt_dir: str, out_dir: str) -> List[str]:
+    def _build_command(
+        self,
+        *,
+        repo_path: str,
+        npz_path: str,
+        ckpt_dir: str,
+        out_dir: str,
+        local_regions: bool = True,
+        filter_grasps: bool = True,
+    ) -> List[str]:
         runner_path = _repo_root() / "script_runtime" / "runners" / "run_contact_graspnet_headless.py"
-        return [
+        command = [
             self.python_bin,
             str(runner_path),
             "--repo-path",
@@ -2435,9 +2543,12 @@ class ContactGraspNetBackend(GraspProposalBackend):
             str(Path(ckpt_dir).expanduser().resolve()),
             "--out-dir",
             str(Path(out_dir).expanduser().resolve()),
-            "--local-regions",
-            "--filter-grasps",
         ]
+        if local_regions:
+            command.append("--local-regions")
+        if filter_grasps:
+            command.append("--filter-grasps")
+        return command
 
     @staticmethod
     def _build_bbox_segmap(*, shape: tuple[int, ...], box_xyxy: Any):
@@ -2596,6 +2707,63 @@ class ContactGraspNetBackend(GraspProposalBackend):
         item["semantic_priority"] = max(existing_priority, float(semantic_priority))
         return item
 
+    @staticmethod
+    def _inherit_template_task_semantics(
+        *,
+        candidate: Dict[str, Any],
+        template: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        item = dict(candidate)
+        source = dict(template or {})
+        if not source:
+            return item
+
+        for key in (
+            "task_compatibility",
+            "functional_role",
+            "semantic_reference_contact_id",
+            "contact_group_index",
+            "object_model_name",
+            "object_model_id",
+        ):
+            if source.get(key) is not None and item.get(key) in (None, "", []):
+                item[key] = source.get(key)
+
+        template_contact_id = source.get("contact_point_id")
+        if template_contact_id is not None and item.get("template_contact_point_id") is None:
+            item["template_contact_point_id"] = template_contact_id
+
+        template_affordance = dict(source.get("affordance") or {})
+        if source.get("affordance_type") and not item.get("affordance_type"):
+            item["affordance_type"] = source.get("affordance_type")
+
+        if template_affordance:
+            affordance = dict(item.get("affordance") or {})
+            for key in (
+                "task_compatibility",
+                "affordance_type",
+                "functional_role",
+                "notes",
+                "preferred_affordances",
+                "strict",
+                "visual_review_required",
+            ):
+                if template_affordance.get(key) is not None and affordance.get(key) in (None, "", []):
+                    affordance[key] = template_affordance.get(key)
+            if source.get("semantic_source") and not affordance.get("template_semantic_source"):
+                affordance["template_semantic_source"] = source.get("semantic_source")
+            if template_contact_id is not None and affordance.get("template_contact_point_id") is None:
+                affordance["template_contact_point_id"] = template_contact_id
+            if affordance:
+                item["affordance"] = affordance
+
+        template_semantic_source = str(source.get("semantic_source") or "").strip()
+        if template_semantic_source:
+            item["template_semantic_source"] = template_semantic_source
+
+        item["task_semantics_origin"] = "template_contact"
+        return item
+
     def _load_template_candidates(
         self,
         *,
@@ -2747,6 +2915,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 semantic_source="contact_graspnet_guided_contact_family",
                 semantic_priority=1.0 + max(float(best_support or 0.0), 0.0),
             )
+            item = self._inherit_template_task_semantics(candidate=item, template=template)
             variants.append(item)
         return variants
 
@@ -2804,6 +2973,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 semantic_source="contact_graspnet_template_transfer",
                 semantic_priority=0.5 + float(raw_score),
             )
+            item = self._inherit_template_task_semantics(candidate=item, template=template)
             variants.append(item)
         return variants
 
@@ -3079,6 +3249,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                     semantic_source="contact_graspnet_guided_availability_bridge",
                     semantic_priority=1.25 + max(support, 0.0),
                 )
+                candidate = self._inherit_template_task_semantics(candidate=candidate, template=template)
                 if best_support is None or _sort_key_for_candidate(candidate) < _sort_key_for_candidate(best_variant or {}):
                     best_support = support
                     best_variant = candidate
@@ -3533,29 +3704,41 @@ def build_default_fm_first_grasp_stack(
     contact_graspnet_max_candidates: int = 12,
     graspnet_repo: str | None = None,
     graspgen_repo: str | None = None,
+    include_grounded_sam2: bool = True,
+    include_task_goal_grounder: bool = True,
+    include_foundationpose: bool = True,
+    include_contact_graspnet: bool = True,
+    include_graspnet_baseline: bool = True,
+    include_graspgen: bool = True,
     include_oracle_pose: bool = True,
     include_oracle_grasp: bool = True,
     include_depth_pose: bool = True,
     include_depth_grasp: bool = True,
 ) -> FMFirstGraspStackAdapter:
-    target_grounders: List[TargetGrounder] = [
-        GroundedSAM2Grounder(
-            repo_path=grounded_sam2_repo,
-            model_id=grounded_sam2_model_id,
-            box_threshold=grounded_sam2_box_threshold,
-            text_threshold=grounded_sam2_text_threshold,
-            max_detections=grounded_sam2_max_detections,
-            device=grounded_sam2_device,
-        ),
-        TaskGoalTargetGrounder(),
-    ]
-    pose_estimators: List[ObjectPoseEstimator] = [
-        FoundationPoseEstimator(
-            repo_path=foundationpose_repo,
-            python_bin=foundationpose_python_bin,
-            timeout_s=foundationpose_timeout_s,
-        ),
-    ]
+    target_grounders: List[TargetGrounder] = []
+    if include_grounded_sam2:
+        target_grounders.append(
+            GroundedSAM2Grounder(
+                repo_path=grounded_sam2_repo,
+                model_id=grounded_sam2_model_id,
+                box_threshold=grounded_sam2_box_threshold,
+                text_threshold=grounded_sam2_text_threshold,
+                max_detections=grounded_sam2_max_detections,
+                device=grounded_sam2_device,
+            )
+        )
+    if include_task_goal_grounder:
+        target_grounders.append(TaskGoalTargetGrounder())
+
+    pose_estimators: List[ObjectPoseEstimator] = []
+    if include_foundationpose:
+        pose_estimators.append(
+            FoundationPoseEstimator(
+                repo_path=foundationpose_repo,
+                python_bin=foundationpose_python_bin,
+                timeout_s=foundationpose_timeout_s,
+            )
+        )
     if include_depth_pose and robotwin_depth_provider is not None:
         pose_estimators.append(
             DelegatePoseEstimator(
@@ -3573,17 +3756,21 @@ def build_default_fm_first_grasp_stack(
             )
         )
 
-    grasp_backends: List[GraspProposalBackend] = [
-        ContactGraspNetBackend(
-            repo_path=contact_graspnet_repo,
-            python_bin=contact_graspnet_python_bin,
-            timeout_s=contact_graspnet_timeout_s,
-            max_candidates=contact_graspnet_max_candidates,
-            template_delegate=robotwin_depth_provider,
-        ),
-        GraspNetBaselineBackend(repo_path=graspnet_repo),
-        GraspGenBackend(repo_path=graspgen_repo),
-    ]
+    grasp_backends: List[GraspProposalBackend] = []
+    if include_contact_graspnet:
+        grasp_backends.append(
+            ContactGraspNetBackend(
+                repo_path=contact_graspnet_repo,
+                python_bin=contact_graspnet_python_bin,
+                timeout_s=contact_graspnet_timeout_s,
+                max_candidates=contact_graspnet_max_candidates,
+                template_delegate=robotwin_depth_provider,
+            )
+        )
+    if include_graspnet_baseline:
+        grasp_backends.append(GraspNetBaselineBackend(repo_path=graspnet_repo))
+    if include_graspgen:
+        grasp_backends.append(GraspGenBackend(repo_path=graspgen_repo))
     if include_oracle_grasp and oracle_backend is not None:
         grasp_backends.append(DelegateGraspProposalBackend("oracle_feasibility", oracle_backend))
     if include_depth_grasp and robotwin_depth_provider is not None:

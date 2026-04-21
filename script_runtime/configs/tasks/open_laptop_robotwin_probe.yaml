@@ -1,0 +1,30 @@
+task_contract: articulated_probe
+probe_type: articulated
+
+runtime:
+  task_id: open_laptop_probe
+  trace_path: script_runtime/artifacts/robotwin_open_laptop_probe_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_open_laptop_probe
+  write_trace: true
+  export_artifacts: true
+
+robotwin:
+  task_name: open_laptop
+  task_config: demo_clean
+  seed: 1
+  object_attr: laptop
+  target_attr: laptop
+  target_functional_point_id: 1
+  object_functional_point_id: 0
+  pregrasp_distance: 0.08
+  place_approach_distance: 0.02
+  place_release_distance: 0.0
+  retreat_distance: 0.08
+  place_constrain: free
+  capture_video: true
+  episode_name: open_laptop_probe
+
+task_goal:
+  task_name: open_laptop
+  target_object: laptop_handle
+  target_surface: laptop_lid

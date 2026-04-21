@@ -24,8 +24,36 @@ entries:
     probe_type: handover
 
   - name: open_microwave_probe
-    group: articulated_probe_backlog
+    group: articulated_probe
+    mode: baseline
+    enabled: true
+    config_path: tasks/open_microwave_robotwin_probe.yaml
+    task_contract: articulated_probe
+    probe_type: articulated
+
+  - name: place_bread_basket_probe
+    group: staged_place_probe_wave2
     mode: baseline
     enabled: false
-    config_path: tasks/open_microwave_robotwin_probe.yaml
-    deferred_reason: articulated-object probe backlog; do not include in the current near-term platform phase
+    config_path: tasks/place_bread_basket_robotwin_probe.yaml
+    task_contract: staged_place_probe
+    probe_type: staged_place
+    deferred_reason: second-wave staged-place probe; multi-object sequence stays out of the current near-term probe phase
+
+  - name: handover_mic_probe
+    group: handover_probe_wave2
+    mode: baseline
+    enabled: false
+    config_path: tasks/handover_mic_robotwin_probe.yaml
+    task_contract: handover_probe
+    probe_type: handover
+    deferred_reason: second-wave handover probe; enable only after handover_block reaches stable smoke or stable classified failure
+
+  - name: open_laptop_probe
+    group: articulated_probe_wave2
+    mode: baseline
+    enabled: false
+    config_path: tasks/open_laptop_robotwin_probe.yaml
+    task_contract: articulated_probe
+    probe_type: articulated
+    deferred_reason: second-wave articulated probe; enable only after open_microwave reaches stable smoke or stable classified failure

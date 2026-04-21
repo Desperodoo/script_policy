@@ -1,0 +1,31 @@
+task_contract: handover_probe
+probe_type: handover
+
+runtime:
+  task_id: handover_mic_probe
+  trace_path: script_runtime/artifacts/robotwin_handover_mic_probe_trace.jsonl
+  artifact_dir: script_runtime/artifacts/robotwin_handover_mic_probe
+  write_trace: true
+  export_artifacts: true
+
+robotwin:
+  task_name: handover_mic
+  task_config: demo_clean
+  seed: 1
+  object_attr: microphone
+  target_attr: microphone
+  target_pose_attr: handover_middle_pose
+  target_functional_point_id: 0
+  object_functional_point_id: 0
+  pregrasp_distance: 0.10
+  place_approach_distance: 0.02
+  place_release_distance: 0.0
+  retreat_distance: 0.08
+  place_constrain: free
+  capture_video: true
+  episode_name: handover_mic_probe
+
+task_goal:
+  task_name: handover_mic
+  target_object: microphone
+  target_surface: handover_middle_pose

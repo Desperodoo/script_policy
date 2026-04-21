@@ -25,21 +25,22 @@ from script_runtime.core import SkillContext, TaskBlackboard, WorldState
 from script_runtime.core.skill_base import clear_pending_refresh_reason, set_pending_refresh_reason
 from script_runtime.executors import TraceRecorder, TreeExecutor
 from script_runtime.factory import build_default_skill_registry
-from script_runtime.tasks import HandoverProbeTask, PegInsertTask, PickPlaceTask, StagedPlaceProbeTask
-from script_runtime.tasks.articulated.drawer_open_pick import DrawerOpenPickTask
+from script_runtime.tasks import ArticulatedProbeTask, HandoverProbeTask, PegInsertTask, PickPlaceTask, StagedPlaceProbeTask
 from script_runtime.place import ClosedLoopPlaceModule, HeuristicPlaceModule
 
 TASK_NAME_CONTRACT_HINTS = {
     "handover_block": "handover_probe",
     "handover_mic": "handover_probe",
-    "open_laptop": "drawer_open_pick",
-    "open_microwave": "drawer_open_pick",
+    "open_laptop": "articulated_probe",
+    "open_microwave": "articulated_probe",
     "place_can_basket": "staged_place_probe",
+    "place_bread_basket": "staged_place_probe",
     "place_object_basket": "staged_place_probe",
 }
 TASK_CONTRACT_ALIASES = {
-    "articulated_probe": "drawer_open_pick",
-    "articulated_task": "drawer_open_pick",
+    "articulated_probe": "articulated_probe",
+    "articulated_task": "articulated_probe",
+    "drawer_open_pick": "articulated_probe",
     "handover": "handover_probe",
     "handover_probe": "handover_probe",
     "peg_insert": "peg_insert",
@@ -93,8 +94,8 @@ def build_task_from_config(config: Dict[str, Any]) -> Any:
         return StagedPlaceProbeTask(goal=task_goal)
     if contract == "handover_probe":
         return HandoverProbeTask(goal=task_goal)
-    if contract == "drawer_open_pick":
-        return DrawerOpenPickTask(goal=task_goal)
+    if contract == "articulated_probe":
+        return ArticulatedProbeTask(goal=task_goal)
     if contract == "peg_insert":
         return PegInsertTask(goal=task_goal)
     raise ValueError(f"Unsupported task_contract: {contract}")
@@ -438,6 +439,12 @@ def _build_fm_first_grasp_stack_from_config(
         contact_graspnet_max_candidates=int(contact_graspnet_cfg.get("max_candidates", 12)),
         graspnet_repo=repos.get("graspnet_baseline"),
         graspgen_repo=repos.get("graspgen"),
+        include_grounded_sam2=bool(enabled.get("grounded_sam2", True)),
+        include_task_goal_grounder=bool(enabled.get("task_goal_grounder", True)),
+        include_foundationpose=bool(enabled.get("foundationpose", True)),
+        include_contact_graspnet=bool(enabled.get("contact_graspnet", True)),
+        include_graspnet_baseline=bool(enabled.get("graspnet_baseline", False)),
+        include_graspgen=bool(enabled.get("graspgen", False)),
         include_oracle_pose=bool(enabled.get("oracle_pose", True)),
         include_oracle_grasp=bool(enabled.get("oracle_grasp", True)),
         include_depth_pose=bool(enabled.get("robotwin_depth_pose", robotwin)),

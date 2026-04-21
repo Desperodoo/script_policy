@@ -2,9 +2,10 @@
 
 from .peg_insert import PegInsertTask
 from .pick_place import PickPlaceTask
-from .probes import HandoverProbeTask, StagedPlaceProbeTask
+from .probes import ArticulatedProbeTask, HandoverProbeTask, StagedPlaceProbeTask
 
 __all__ = [
+    "ArticulatedProbeTask",
     "HandoverProbeTask",
     "PegInsertTask",
     "PickPlaceTask",

@@ -85,6 +85,7 @@ class Skill:
         event = TraceEvent(
             task_id=context.task_id or execution.task_id,
             skill_name=self.name,
+            node_name=str(context.metadata.get("current_node_name") or ""),
             result=result.status.value,
             failure_code=result.failure_code.value,
             duration_s=duration_s,

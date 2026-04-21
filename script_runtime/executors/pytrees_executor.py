@@ -91,7 +91,15 @@ class SkillNode(Node):
     def tick(self, context: SkillContext) -> SkillResult:
         skill = context.metadata["registry"].get(self.skill_name)
         context.world_state.execution.current_skill = skill.name
-        return skill.execute(context)
+        previous_node_name = context.metadata.get("current_node_name")
+        context.metadata["current_node_name"] = self.name
+        try:
+            return skill.execute(context)
+        finally:
+            if previous_node_name is None:
+                context.metadata.pop("current_node_name", None)
+            else:
+                context.metadata["current_node_name"] = previous_node_name
 
 
 class SequenceNode(Node):
