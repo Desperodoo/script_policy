@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -317,6 +318,8 @@ def test_extract_run_summary_handles_optional_fm_first_fields():
     assert summary["selected_backend_kind"] == "fm_backend"
     assert summary["guided_feasible_families"] == ["guided_c2"]
     assert summary["template_source_debug"]["source_kind"] == "template_delegate"
+    assert summary["inspect_selected_backend"] == ""
+    assert summary["inspect_fallback_reason"] == ""
 
     summary_without_optional = extract_run_summary(
         spec=spec,
@@ -335,6 +338,82 @@ def test_extract_run_summary_handles_optional_fm_first_fields():
 
     assert summary_without_optional["selected_backend_kind"] == ""
     assert summary_without_optional["template_source_debug"] == {}
+
+
+def test_extract_run_summary_exposes_inspect_backend_fields_from_fm_backend_summary(tmp_path: Path):
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="fm_compare",
+        gate=False,
+        entry_name="place_empty_cup_graspnet_baseline_compare",
+        group="healthy5_graspnet_baseline",
+        mode="fm_first",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="pick_place",
+        probe_type="",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "place_empty_cup",
+            "object_attr": "cup",
+            "target_attr": "coaster",
+        },
+        "task_goal": {
+            "task_name": "place_empty_cup",
+            "target_object": "cup",
+            "target_surface": "coaster",
+        },
+    }
+    summary_path = tmp_path / "fm_backend_summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "selected_backend": "oracle_feasibility",
+                "selected_backend_kind": "fallback_delegate",
+                "fallback_reason": "integration_not_implemented",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(status="SUCCESS", message="ok"),
+        runtime_artifacts={
+            "task_id": "fm-first-seed1",
+            "run_dir": "/tmp/fm-first-seed1",
+            "fm_backend_summary_json": str(summary_path),
+        },
+        rows=[
+            {
+                "skill_name": "GetGraspCandidates",
+                "result": "SUCCESS",
+                "failure_code": "NONE",
+                "inputs_summary": {
+                    "payload": {
+                        "selected_backend": "depth_synthesized",
+                        "selected_backend_kind": "fallback_delegate",
+                        "fallback_reason": "integration_not_implemented",
+                        "grasp_candidates": [],
+                    }
+                },
+            },
+            {
+                "skill_name": "CheckTaskSuccess",
+                "result": "SUCCESS",
+                "failure_code": "NONE",
+                "inputs_summary": {"payload": {"env_success": True, "env_result": {"ok": True, "success": True}}},
+            },
+        ],
+    )
+
+    assert summary["selected_backend"] == "depth_synthesized"
+    assert summary["inspect_selected_backend"] == "oracle_feasibility"
+    assert summary["inspect_selected_backend_kind"] == "fallback_delegate"
+    assert summary["inspect_fallback_reason"] == "integration_not_implemented"
 
 
 def test_extract_run_summary_falls_back_to_run_result_failure_code_for_timeouts():
@@ -600,6 +679,148 @@ def test_extract_run_summary_exposes_probe_stage_from_node_name():
 
     assert summary["failure_node_name"] == "articulated_handle_alignment"
     assert summary["probe_stage"] == "pre_open_alignment"
+
+
+def test_extract_run_summary_exposes_contract_gap_hint_for_staged_place_follow_up():
+    spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="place_can_basket_probe",
+        group="staged_place_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="staged_place_probe",
+        probe_type="staged_place",
+    )
+    config = {
+        "robotwin": {
+            "task_name": "place_can_basket",
+            "object_attr": "can",
+            "target_attr": "basket",
+            "target_functional_point_id": 0,
+            "object_functional_point_id": 0,
+            "episode_name": "place_can_basket",
+        },
+        "task_goal": {
+            "task_name": "place_can_basket",
+            "target_object": "can",
+            "target_surface": "basket",
+        },
+    }
+
+    rows = [
+        {"skill_name": "OpenGripper", "node_name": "post_place_open_gripper", "result": "SUCCESS", "failure_code": "NONE"},
+        {"skill_name": "Retreat", "node_name": "post_place_retreat", "result": "SUCCESS", "failure_code": "NONE"},
+        {
+            "skill_name": "CheckTaskSuccess",
+            "node_name": "check_task_success",
+            "result": "FAILURE",
+            "failure_code": "UNKNOWN",
+            "inputs_summary": {"payload": {"message": "Environment success check failed"}},
+        },
+    ]
+
+    summary = extract_run_summary(
+        spec=spec,
+        config=config,
+        run_result=SimpleNamespace(status="FAILURE", message="Environment success check failed", failure_code="UNKNOWN"),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=rows,
+    )
+
+    assert summary["probe_stage"] == "post_place_follow_up"
+    assert summary["contract_gap_hint"] == "support_regrasp_and_basket_lift_missing"
+
+
+def test_extract_run_summary_exposes_contract_gap_hint_for_handover_and_articulated_probes():
+    handover_spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="handover_block_probe",
+        group="handover_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="handover_probe",
+        probe_type="handover",
+    )
+    handover_config = {
+        "robotwin": {
+            "task_name": "handover_block",
+            "object_attr": "box",
+            "target_attr": "target_box",
+        },
+        "task_goal": {
+            "task_name": "handover_block",
+            "target_object": "box",
+            "target_surface": "target_box",
+        },
+    }
+    handover_summary = extract_run_summary(
+        spec=handover_spec,
+        config=handover_config,
+        run_result=SimpleNamespace(status="FAILURE", message="No planner-feasible next candidate available", failure_code="GRASP_FAIL"),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=[
+            {
+                "skill_name": "ExecuteGraspPhase",
+                "node_name": "source_execute_grasp_phase",
+                "result": "FAILURE",
+                "failure_code": "GRASP_FAIL",
+                "inputs_summary": {"payload": {"message": "No planner-feasible next candidate available"}},
+            }
+        ],
+    )
+    assert handover_summary["probe_stage"] == "source_acquisition"
+    assert handover_summary["contract_gap_hint"] == "source_grasp_closure_or_candidate_family_gap"
+
+    articulated_spec = RunSpec(
+        suite_name="demo_suite",
+        suite_role="complex_probe",
+        gate=False,
+        entry_name="open_microwave_probe",
+        group="articulated_probe",
+        mode="baseline",
+        config_path="config.yaml",
+        seed=1,
+        no_video=True,
+        task_contract="articulated_probe",
+        probe_type="articulated",
+    )
+    articulated_config = {
+        "robotwin": {
+            "task_name": "open_microwave",
+            "object_attr": "microwave",
+            "target_attr": "microwave",
+        },
+        "task_goal": {
+            "task_name": "open_microwave",
+            "target_object": "microwave_handle",
+            "target_surface": "microwave_door",
+        },
+    }
+    articulated_summary = extract_run_summary(
+        spec=articulated_spec,
+        config=articulated_config,
+        run_result=SimpleNamespace(status="FAILURE", message="Grasp phase did not secure object", failure_code="GRASP_FAIL"),
+        runtime_artifacts={"task_id": "probe-seed1", "run_dir": "/tmp/probe-seed1"},
+        rows=[
+            {
+                "skill_name": "ExecuteGraspPhase",
+                "node_name": "articulated_execute_grasp_phase",
+                "result": "FAILURE",
+                "failure_code": "GRASP_FAIL",
+                "inputs_summary": {"payload": {"message": "Grasp phase did not secure object"}},
+            }
+        ],
+    )
+    assert articulated_summary["probe_stage"] == "handle_acquisition"
+    assert articulated_summary["contract_gap_hint"] == "handle_grasp_closure_gap"
 
 
 def test_run_suite_forces_isolated_for_gate_suites(tmp_path: Path):

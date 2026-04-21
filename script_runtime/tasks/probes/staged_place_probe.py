@@ -14,7 +14,7 @@ from script_runtime.tasks.probes.common import (
 
 
 class StagedPlaceProbeTask(ScriptTask):
-    """Probe staged-place contracts without assuming final open-gripper release."""
+    """Probe staged-place contracts with an explicit post-place release follow-up."""
 
     def __init__(self, goal: dict | None = None):
         super().__init__(
@@ -80,6 +80,11 @@ class StagedPlaceProbeTask(ScriptTask):
                 ),
                 SkillNode("place_approach", "PlaceApproach"),
                 SkillNode("place_release", "PlaceRelease"),
+                # Staged-place probes should make the release step explicit so we
+                # can separate "object was positioned" from "follow-up release /
+                # disengage was missing".
+                SkillNode("post_place_open_gripper", "OpenGripper"),
+                SkillNode("post_place_retreat", "Retreat"),
                 SkillNode("check_contact", "CheckContact"),
                 SkillNode("check_task_success", "CheckTaskSuccess"),
             ],

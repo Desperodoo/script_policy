@@ -237,6 +237,46 @@ def _probe_stage_from_row(task_contract: str, row: Dict[str, Any] | None) -> str
     return ""
 
 
+def _contract_gap_hint(
+    *,
+    task_name: str,
+    task_contract: str,
+    failure_stage: str,
+    probe_stage: str,
+    rows: Sequence[Dict[str, Any]],
+) -> str:
+    task = str(task_name or "").strip().lower()
+    contract = str(task_contract or "").strip().lower()
+    stage = str(failure_stage or "").strip().lower()
+    probe = str(probe_stage or "").strip().lower()
+
+    skill_rows = list(rows or [])
+    release_succeeded = any(
+        _skill_name(row) == "OpenGripper" and str(row.get("result") or "").upper() == "SUCCESS"
+        for row in skill_rows
+    )
+    retreat_succeeded = any(
+        _skill_name(row) == "Retreat" and str(row.get("result") or "").upper() == "SUCCESS"
+        for row in skill_rows
+    )
+
+    if contract == "staged_place_probe":
+        if task == "place_can_basket" and stage == "success_mismatch" and probe == "post_place_follow_up":
+            if release_succeeded and retreat_succeeded:
+                return "support_regrasp_and_basket_lift_missing"
+            return "post_place_release_or_support_regrasp_missing"
+        if stage == "success_mismatch" and probe == "post_place_follow_up":
+            return "post_place_follow_up_contract_gap"
+
+    if contract == "handover_probe" and stage == "grasp_closure" and probe == "source_acquisition":
+        return "source_grasp_closure_or_candidate_family_gap"
+
+    if contract == "articulated_probe" and stage == "grasp_closure" and probe == "handle_acquisition":
+        return "handle_grasp_closure_gap"
+
+    return ""
+
+
 def _status_value(run_result: Any | None) -> str:
     if run_result is None:
         return "ERROR"
@@ -631,6 +671,12 @@ def extract_run_summary(
     trace_path = Path(trace_path_text) if trace_path_text else None
     run_dir = Path(run_dir_text) if run_dir_text else None
     rows = rows if rows is not None else (_trace_rows(trace_path) if trace_path is not None else [])
+    fm_backend_summary_path_text = str(runtime_artifacts.get("fm_backend_summary_json") or "").strip()
+    fm_backend_summary = (
+        _read_run_summary(Path(fm_backend_summary_path_text))
+        if fm_backend_summary_path_text
+        else {}
+    )
 
     robotwin = dict(config.get("robotwin") or {})
     task_goal = dict(config.get("task_goal") or {})
@@ -705,6 +751,13 @@ def extract_run_summary(
     task_contract = spec.task_contract or resolve_task_contract(config)
     probe_stage = _probe_stage_from_row(task_contract, failure_row)
     terminal_probe_stage = _probe_stage_from_row(task_contract, terminal_failure_row)
+    contract_gap_hint = _contract_gap_hint(
+        task_name=str(robotwin.get("task_name") or spec.entry_name),
+        task_contract=task_contract,
+        failure_stage=failure_stage,
+        probe_stage=probe_stage,
+        rows=rows,
+    )
 
     object_model = (
         str(top_candidate.get("object_model_name") or "")
@@ -736,6 +789,7 @@ def extract_run_summary(
         "failure_node_name": failure_node_name,
         "failure_stage": failure_stage,
         "probe_stage": probe_stage,
+        "contract_gap_hint": contract_gap_hint,
         "terminal_failure_code": terminal_failure_code,
         "terminal_failure_skill": terminal_failure_skill,
         "terminal_failure_node_name": terminal_failure_node_name,
@@ -753,6 +807,9 @@ def extract_run_summary(
         "selected_backend": str(first_grasp_payload.get("selected_backend") or ""),
         "selected_backend_kind": str(first_grasp_payload.get("selected_backend_kind") or ""),
         "fallback_reason": str(first_grasp_payload.get("fallback_reason") or ""),
+        "inspect_selected_backend": str(fm_backend_summary.get("selected_backend") or ""),
+        "inspect_selected_backend_kind": str(fm_backend_summary.get("selected_backend_kind") or ""),
+        "inspect_fallback_reason": str(fm_backend_summary.get("fallback_reason") or ""),
         "guided_feasible_families": list(first_grasp_payload.get("guided_feasible_families") or []),
         "template_source_debug": dict(stage_summary.get("template_source_debug") or {}),
         "candidate_count": len(grasp_candidates),
@@ -777,6 +834,7 @@ def extract_run_summary(
         "realview_contact_sheet_png": str(runtime_artifacts.get("realview_contact_sheet_png") or ""),
         "grounding_json": str(runtime_artifacts.get("grounding_json") or ""),
         "grasp_candidate_refresh_history_json": str(runtime_artifacts.get("grasp_candidate_refresh_history_json") or ""),
+        "fm_backend_summary_json": fm_backend_summary_path_text,
         "error_type": error_type,
         "error": error_text,
         "traceback": traceback_text,
@@ -857,6 +915,22 @@ def _write_fm_backend_summary(inspect_payload: Dict[str, Any], out_path: Path) -
     }
     _write_json(out_path, payload)
     return payload
+
+
+def _merge_fm_inspect_fields_into_summary(summary: Dict[str, Any], fm_artifacts: Dict[str, Any]) -> Dict[str, Any]:
+    summary = dict(summary or {})
+    fm_artifacts = dict(fm_artifacts or {})
+    backend_summary_path_text = str(fm_artifacts.get("fm_backend_summary_json") or summary.get("fm_backend_summary_json") or "").strip()
+    if not backend_summary_path_text:
+        return summary
+    backend_summary = _read_run_summary(Path(backend_summary_path_text))
+    if not backend_summary:
+        return summary
+    summary["fm_backend_summary_json"] = backend_summary_path_text
+    summary["inspect_selected_backend"] = str(backend_summary.get("selected_backend") or "")
+    summary["inspect_selected_backend_kind"] = str(backend_summary.get("selected_backend_kind") or "")
+    summary["inspect_fallback_reason"] = str(backend_summary.get("fallback_reason") or "")
+    return summary
 
 
 def _maybe_collect_fm_compare_artifacts(
@@ -1008,6 +1082,7 @@ def _execute_run_in_process(
     fm_artifacts = _maybe_collect_fm_compare_artifacts(spec=spec, config=config, suite_artifact_dir=suite_artifact_dir)
     if fm_artifacts:
         summary.update(fm_artifacts)
+        summary = _merge_fm_inspect_fields_into_summary(summary, fm_artifacts)
         summary["artifact_paths"] = _artifact_paths_from_mapping(summary)
     return summary
 
@@ -1067,6 +1142,7 @@ def _execute_run_subprocess(
         fm_artifacts = _maybe_collect_fm_compare_artifacts(spec=spec, config=config, suite_artifact_dir=suite_artifact_dir)
         if fm_artifacts:
             summary.update(fm_artifacts)
+            summary = _merge_fm_inspect_fields_into_summary(summary, fm_artifacts)
             summary["artifact_paths"] = _artifact_paths_from_mapping(summary)
         if completed.stdout:
             summary["subprocess_stdout_tail"] = completed.stdout[-4000:]
@@ -1417,21 +1493,22 @@ def build_markdown_report(report: Dict[str, Any]) -> str:
             "",
             "## Per Run",
             "",
-            "| Task | Seed | Mode | Contract | Probe Type | Probe Stage | Backend | Canary | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Task | Seed | Mode | Contract | Probe Type | Probe Stage | Hint | Backend | Canary | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for row in list(report.get("runs") or []):
         top = dict(row.get("top_candidate") or {})
         executed = dict(row.get("executed_candidate") or {})
         lines.append(
-            "| {task} | {seed} | {mode} | {contract} | {probe_type} | {probe_stage} | {backend} | {canary} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
+            "| {task} | {seed} | {mode} | {contract} | {probe_type} | {probe_stage} | {hint} | {backend} | {canary} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
                 task=row.get("task", ""),
                 seed=row.get("seed", ""),
                 mode=row.get("mode", ""),
                 contract=row.get("task_contract", ""),
                 probe_type=row.get("probe_type", ""),
                 probe_stage=row.get("probe_stage", ""),
+                hint=row.get("contract_gap_hint", ""),
                 backend=row.get("selected_backend", ""),
                 canary=str(bool(row.get("canary", False))).lower(),
                 status=row.get("final_status", ""),

@@ -32,6 +32,14 @@ def test_staged_place_probe_uses_relaxed_probe_timeouts():
     assert grasp.timeout_s == PROBE_EXECUTE_GRASP_TIMEOUT_S
 
 
+def test_staged_place_probe_includes_explicit_post_place_release_follow_up():
+    root = StagedPlaceProbeTask().build(registry=None)
+    assert isinstance(root, SequenceNode)
+    child_names = [child.name for child in root.children]
+    assert "post_place_open_gripper" in child_names
+    assert "post_place_retreat" in child_names
+
+
 def test_articulated_probe_uses_relaxed_probe_timeouts():
     prepare, pregrasp, grasp = _grasp_timeout_nodes(ArticulatedProbeTask())
     assert prepare.timeout_s == PROBE_PREPARE_GRIPPER_TIMEOUT_S

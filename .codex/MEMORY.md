@@ -3,6 +3,53 @@
 ## 当前项目记忆
 
 - 2026-04-21 当前最新阶段结论补充：
+  - 2026-04-21 晚些时候又完成了一轮“complex probe + compare 并行收口”：
+    - `place_can_basket_probe` 当前已补显式 post-place release follow-up：
+      - `StagedPlaceProbeTask` 现在会在 `PlaceRelease` 之后继续执行：
+        - `OpenGripper`
+        - `Retreat`
+      - 真实复跑后，任务仍未 env success，但新的 summary 已不再只写笼统 `success_mismatch`
+      - 当前汇总直接透出：
+        - `contract_gap_hint = support_regrasp_and_basket_lift_missing`
+      - 这与 RoboTwin 官方任务逻辑是一致的：
+        - 单纯把 can 放进 basket 还不够
+        - 后续还需要对 basket 做 follow-up grasp / lift
+    - complex probe summary 当前已新增统一的 `contract_gap_hint`：
+      - `staged_place_probe`
+        - `place_can_basket` 当前会给出：
+          - `support_regrasp_and_basket_lift_missing`
+      - `handover_probe`
+        - 当前 source grasp closure 场景会给出：
+          - `source_grasp_closure_or_candidate_family_gap`
+      - `articulated_probe`
+        - 当前 handle grasp closure 场景会给出：
+          - `handle_grasp_closure_gap`
+      - 这意味着 complex probe 当前已经不止能报“失败在哪个阶段”
+      - 还开始能报“当前最像哪类 contract 缺口”
+    - `GraspNetBaseline / GraspGen` compare 线当前也已继续前移：
+      - 本机 `third_party/graspnet-baseline`
+      - 本机 `third_party/GraspGen`
+      已经拉到工作区
+      - 重新跑 `place_empty_cup` compare 之后，当前 fallback reason 已从：
+        - `repo_missing`
+      前移为：
+        - `integration_not_implemented`
+      - 这说明当前首要阻塞已经不再是“仓库路径缺失”
+      - 而是：
+        - adapter/runtime integration 还没真正接上
+    - compare summary 当前已补双视角字段：
+      - runtime 侧继续保留：
+        - `selected_backend`
+        - `selected_backend_kind`
+        - `fallback_reason`
+      - inspect 侧新增：
+        - `inspect_selected_backend`
+        - `inspect_selected_backend_kind`
+        - `inspect_fallback_reason`
+      - 目的：
+        - 不再把“真实执行时选了谁”
+        - 与“FM inspect 侧认为谁可用”
+        混成一个字段
   - `healthy5` 的 FM 多 seed 稳定性验证已完成：
     - artifact：
       - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare_semantic_bridge_healthy5/`

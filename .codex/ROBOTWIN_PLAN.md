@@ -7,6 +7,49 @@
 ## 2026-04-21 下一阶段推进状态
 
 - 当前最新阶段状态补充：
+  - 2026-04-21 晚些时候又完成了一轮“complex probe / compare 并行收口”：
+    - `place_can_basket_probe`
+      - 当前已补显式 post-place follow-up：
+        - `OpenGripper`
+        - `Retreat`
+      - 真实复跑后仍是 `success_mismatch`
+      - 但 summary 当前已直接透出：
+        - `contract_gap_hint = support_regrasp_and_basket_lift_missing`
+      - 这说明 staged-place 家族当前对 basket 任务的下一步，已经明确收敛为：
+        - support object regrasp
+        - basket lift
+      - 不再只是笼统的 post-place follow-up
+    - complex probe 统一 summary 当前已新增：
+      - `contract_gap_hint`
+      - 当前家族级含义固定为：
+        - staged-place:
+          - `support_regrasp_and_basket_lift_missing`
+          - 或更泛化的 `post_place_follow_up_contract_gap`
+        - handover:
+          - `source_grasp_closure_or_candidate_family_gap`
+        - articulated:
+          - `handle_grasp_closure_gap`
+    - `GraspNetBaseline / GraspGen` compare 线当前也已前移一层：
+      - 本机缺失 repo 已补到：
+        - `third_party/graspnet-baseline`
+        - `third_party/GraspGen`
+      - 重新跑 `place_empty_cup` smoke 后：
+        - fallback reason 已从 `repo_missing`
+        - 前移为 `integration_not_implemented`
+      - 这意味着 compare 支线当前的首要阻塞已经从：
+        - repo path 缺失
+      变为：
+        - adapter/runtime integration 尚未落地
+    - compare summary 当前已补双视角字段：
+      - runtime:
+        - `selected_backend`
+        - `fallback_reason`
+      - inspect:
+        - `inspect_selected_backend`
+        - `inspect_fallback_reason`
+      - 这样后续看 compare 结果时，可以区分：
+        - 真实执行用了哪个 fallback
+        - inspect 侧认为当前 backend readiness 落在哪
   - `healthy5` 的 FM 多 seed 稳定性验证已经完成：
     - artifact：
       - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_compare_semantic_bridge_healthy5/`
