@@ -3,7 +3,7 @@ suite_role: fm_compare
 gate: false
 require_isolated: true
 artifact_dir: script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare
-default_seeds: [1]
+default_seeds: [1, 2, 3]
 default_no_video: true
 
 backend_flags_base: &backend_flags_base
@@ -43,6 +43,16 @@ fm_compare_stack_common: &fm_compare_stack_common
     timeout_s: 180
   contact_graspnet:
     python_bin: /home/amax/miniforge-pypy3/envs/m2diffuser/bin/python
+    timeout_s: 180
+    max_candidates: 12
+  graspnet_baseline:
+    python_bin: /home/amax/miniforge-pypy3/envs/script_policy/bin/python
+    checkpoint_path: third_party/graspnet-baseline/checkpoints/checkpoint-rs.tar
+    timeout_s: 180
+    max_candidates: 12
+  graspgen:
+    python_bin: /home/amax/miniforge-pypy3/envs/script_policy/bin/python
+    gripper_config: third_party/GraspGenModels/checkpoints/graspgen_robotiq_2f_140.yml
     timeout_s: 180
     max_candidates: 12
   repos:

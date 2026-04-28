@@ -410,6 +410,8 @@ def _build_fm_first_grasp_stack_from_config(
     grounded_cfg = dict(stack_cfg.get("grounded_sam2") or {})
     foundationpose_cfg = dict(stack_cfg.get("foundationpose") or {})
     contact_graspnet_cfg = dict(stack_cfg.get("contact_graspnet") or {})
+    graspnet_cfg = dict(stack_cfg.get("graspnet_baseline") or {})
+    graspgen_cfg = dict(stack_cfg.get("graspgen") or {})
 
     depth_provider = None
     if robotwin:
@@ -438,7 +440,21 @@ def _build_fm_first_grasp_stack_from_config(
         contact_graspnet_timeout_s=int(contact_graspnet_cfg.get("timeout_s", 180)),
         contact_graspnet_max_candidates=int(contact_graspnet_cfg.get("max_candidates", 12)),
         graspnet_repo=repos.get("graspnet_baseline"),
+        graspnet_python_bin=graspnet_cfg.get("python_bin"),
+        graspnet_timeout_s=int(graspnet_cfg.get("timeout_s", 180)),
+        graspnet_max_candidates=int(graspnet_cfg.get("max_candidates", 12)),
+        graspnet_checkpoint_path=graspnet_cfg.get("checkpoint_path"),
         graspgen_repo=repos.get("graspgen"),
+        graspgen_python_bin=graspgen_cfg.get("python_bin"),
+        graspgen_timeout_s=int(graspgen_cfg.get("timeout_s", 180)),
+        graspgen_max_candidates=int(graspgen_cfg.get("max_candidates", 12)),
+        graspgen_gripper_config=graspgen_cfg.get("gripper_config"),
+        graspgen_grasp_threshold=float(graspgen_cfg.get("grasp_threshold", -1.0)),
+        graspgen_num_grasps=int(graspgen_cfg.get("num_grasps", 200)),
+        graspgen_topk_num_grasps=int(graspgen_cfg.get("topk_num_grasps", 100)),
+        graspgen_min_grasps=int(graspgen_cfg.get("min_grasps", 40)),
+        graspgen_max_tries=int(graspgen_cfg.get("max_tries", 6)),
+        graspgen_remove_outliers=bool(graspgen_cfg.get("remove_outliers", True)),
         include_grounded_sam2=bool(enabled.get("grounded_sam2", True)),
         include_task_goal_grounder=bool(enabled.get("task_goal_grounder", True)),
         include_foundationpose=bool(enabled.get("foundationpose", True)),

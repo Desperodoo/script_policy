@@ -24,37 +24,41 @@ class StagedPlaceProbeTask(ScriptTask):
         )
 
     def build(self, registry: Any):
-        grasp_attempt = SequenceNode(
-            "probe_grasp_attempt",
-            [
-                TimeoutNode(
-                    "prepare_gripper_timeout",
-                    SkillNode("prepare_gripper_for_grasp", "PrepareGripperForGrasp"),
-                    timeout_s=PROBE_PREPARE_GRIPPER_TIMEOUT_S,
-                ),
-                TimeoutNode(
-                    "go_pregrasp_timeout",
-                    SkillNode("go_pregrasp", "GoPregrasp"),
-                    timeout_s=PROBE_GO_PREGRASP_TIMEOUT_S,
-                ),
-                SkillNode("reselect_grasp_after_pregrasp", "ReselectGraspAfterPregrasp"),
-                TimeoutNode(
-                    "grasp_phase_timeout",
-                    SkillNode("execute_grasp_phase", "ExecuteGraspPhase"),
-                    timeout_s=PROBE_EXECUTE_GRASP_TIMEOUT_S,
-                ),
-                SkillNode("check_grasp", "CheckGrasp"),
-                SkillNode("lift", "Lift"),
-                SkillNode("check_grasp_after_lift", "CheckGrasp"),
-            ],
-        )
-
-        def build_grasp_recovery(_context, _result):
+        def build_grasp_attempt(name_prefix: str) -> SequenceNode:
             return SequenceNode(
-                "probe_grasp_recovery_sequence",
+                f"{name_prefix}_grasp_attempt",
                 [
-                    SkillNode("safe_retreat", "SafeRetreat"),
-                    SkillNode("retry_next_candidate", "RetryWithNextCandidate"),
+                    TimeoutNode(
+                        f"{name_prefix}_prepare_gripper_timeout",
+                        SkillNode(f"{name_prefix}_prepare_gripper_for_grasp", "PrepareGripperForGrasp"),
+                        timeout_s=PROBE_PREPARE_GRIPPER_TIMEOUT_S,
+                    ),
+                    TimeoutNode(
+                        f"{name_prefix}_go_pregrasp_timeout",
+                        SkillNode(f"{name_prefix}_go_pregrasp", "GoPregrasp"),
+                        timeout_s=PROBE_GO_PREGRASP_TIMEOUT_S,
+                    ),
+                    SkillNode(f"{name_prefix}_reselect_grasp_after_pregrasp", "ReselectGraspAfterPregrasp"),
+                    TimeoutNode(
+                        f"{name_prefix}_grasp_phase_timeout",
+                        SkillNode(f"{name_prefix}_execute_grasp_phase", "ExecuteGraspPhase"),
+                        timeout_s=PROBE_EXECUTE_GRASP_TIMEOUT_S,
+                    ),
+                    SkillNode(f"{name_prefix}_check_grasp", "CheckGrasp"),
+                    SkillNode(f"{name_prefix}_lift", "Lift"),
+                    SkillNode(f"{name_prefix}_check_grasp_after_lift", "CheckGrasp"),
+                ],
+            )
+
+        grasp_attempt = build_grasp_attempt("probe")
+        support_grasp_attempt = build_grasp_attempt("support")
+
+        def build_grasp_recovery(name_prefix: str):
+            return SequenceNode(
+                f"{name_prefix}_grasp_recovery_sequence",
+                [
+                    SkillNode(f"{name_prefix}_safe_retreat", "SafeRetreat"),
+                    SkillNode(f"{name_prefix}_retry_next_candidate", "RetryWithNextCandidate"),
                 ],
             )
 
@@ -75,7 +79,7 @@ class StagedPlaceProbeTask(ScriptTask):
                 ),
                 RetryNode(
                     "grasp_retry_budget",
-                    RecoveryNode("grasp_recovery", grasp_attempt, build_grasp_recovery),
+                    RecoveryNode("grasp_recovery", grasp_attempt, lambda context, result: build_grasp_recovery("probe")),
                     max_attempts=5,
                 ),
                 SkillNode("place_approach", "PlaceApproach"),
@@ -86,7 +90,29 @@ class StagedPlaceProbeTask(ScriptTask):
                 SkillNode("post_place_open_gripper", "OpenGripper"),
                 SkillNode("post_place_retreat", "Retreat"),
                 SkillNode("check_contact", "CheckContact"),
-                SkillNode("check_task_success", "CheckTaskSuccess"),
+                SkillNode("prepare_support_regrasp", "PrepareSupportRegrasp"),
+                RetryNode(
+                    "support_acquire_object",
+                    SequenceNode(
+                        "support_perception_sequence",
+                        [
+                            SkillNode("support_get_object_pose", "GetObjectPose"),
+                            SkillNode("support_get_grasp_candidates", "GetGraspCandidates"),
+                        ],
+                    ),
+                    max_attempts=2,
+                ),
+                RetryNode(
+                    "support_grasp_retry_budget",
+                    RecoveryNode(
+                        "support_grasp_recovery",
+                        support_grasp_attempt,
+                        lambda context, result: build_grasp_recovery("support"),
+                    ),
+                    max_attempts=4,
+                ),
+                SkillNode("support_lift_pull", "SupportLiftPull"),
+                SkillNode("support_check_task_success", "CheckTaskSuccess"),
             ],
         )
         return self.root

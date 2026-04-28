@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import yaml
+
 from .perception_adapter import PerceptionAdapter, PerceptionObservation, RoboTwinDepthPoseProvider
 from script_runtime.planning import (
     annotate_grasp_candidates,
@@ -372,12 +374,13 @@ def _candidate_runtime_reason(candidate: Dict[str, Any]) -> str:
 
 def _guided_family_label(candidate: Dict[str, Any]) -> str:
     label = str(candidate.get("variant_label") or "")
-    match = re.match(r"^(contact_graspnet_guided_c\d+)", label)
+    match = re.match(r"^([a-z0-9_]+_guided_c\d+)", label)
     if match:
         return match.group(1)
     template_id = candidate.get("template_contact_point_id")
     if template_id is not None:
-        return f"contact_graspnet_guided_c{template_id}"
+        backend_name = str(candidate.get("proposal_backend") or "contact_graspnet")
+        return f"{backend_name}_guided_c{template_id}"
     return ""
 
 
@@ -2894,7 +2897,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 "pregrasp_pose": list(template.get("pregrasp_pose") or []),
                 "arm": str(template.get("arm") or active_arm),
                 "score": max(float(best_support or 0.0), 0.0),
-                "variant_label": f"contact_graspnet_guided_c{template_id}",
+                "variant_label": f"{self.name}_guided_c{template_id}",
                 "planner_status": str(template.get("planner_status", "Unknown") or "Unknown"),
                 "planner_waypoint_count": template.get("planner_waypoint_count"),
                 "planner_debug": dict(template.get("planner_debug") or {}),
@@ -2912,7 +2915,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 candidate=item,
                 sdk=sdk,
                 object_pose=object_pose,
-                semantic_source="contact_graspnet_guided_contact_family",
+                semantic_source=f"{self.name}_guided_contact_family",
                 semantic_priority=1.0 + max(float(best_support or 0.0), 0.0),
             )
             item = self._inherit_template_task_semantics(candidate=item, template=template)
@@ -2955,7 +2958,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 "pregrasp_pose": pregrasp_pose,
                 "arm": active_arm,
                 "score": float(raw_score),
-                "variant_label": f"contact_graspnet_template_c{template_id}_{segment_id}_{source_index}",
+                "variant_label": f"{self.name}_template_c{template_id}_{segment_id}_{source_index}",
                 "planner_status": planner_eval["planner_status"],
                 "planner_waypoint_count": planner_eval["planner_waypoint_count"],
                 "planner_debug": planner_eval["planner_debug"],
@@ -2970,7 +2973,7 @@ class ContactGraspNetBackend(GraspProposalBackend):
                 candidate=item,
                 sdk=sdk,
                 object_pose=object_pose,
-                semantic_source="contact_graspnet_template_transfer",
+                semantic_source=f"{self.name}_template_transfer",
                 semantic_priority=0.5 + float(raw_score),
             )
             item = self._inherit_template_task_semantics(candidate=item, template=template)
@@ -3258,84 +3261,668 @@ class ContactGraspNetBackend(GraspProposalBackend):
         return variants
 
 
-class GraspNetBaselineBackend(GraspProposalBackend):
+class _ExternalMatrixGraspBackend(ContactGraspNetBackend):
+    runner_script_name = ""
+    output_subdir_name = ""
+    summary_filename = ""
+
+    def propose_grasps(
+        self,
+        observation: PerceptionObservation,
+        *,
+        context: Any | None = None,
+        grounding: GroundingResult | None = None,
+        object_pose: List[float] | None = None,
+    ) -> BackendResult:
+        readiness = self._readiness()
+        if not readiness.get("available", False):
+            return BackendResult(
+                backend_name=self.name,
+                available=False,
+                ok=False,
+                message=str(readiness.get("message", "backend_unavailable")),
+                diagnostics={**readiness, "repo_path": self.repo_path, "python_bin": self.python_bin},
+            )
+
+        export_dir = _backend_run_dir(context, self.name)
+        export_outputs = self._export_runtime_input(export_dir=export_dir, observation=observation, grounding=grounding)
+        if not export_outputs.get("ok", False):
+            return BackendResult(
+                backend_name=self.name,
+                available=True,
+                ok=False,
+                message=str(export_outputs.get("message", "export_failed")),
+                diagnostics={**readiness, "python_bin": self.python_bin, "export_outputs": export_outputs},
+            )
+
+        output_dir = export_dir / self.output_subdir_name
+        attempt = self._run_external_attempt(
+            readiness=readiness,
+            export_outputs=export_outputs,
+            output_dir=output_dir,
+        )
+        if not attempt.get("ok", False):
+            return BackendResult(
+                backend_name=self.name,
+                available=True,
+                ok=False,
+                message="runtime_failed" if int(attempt.get("returncode", -1)) != 0 else "summary_missing",
+                diagnostics={
+                    **readiness,
+                    "python_bin": self.python_bin,
+                    "export_outputs": export_outputs,
+                    "command": attempt.get("command"),
+                    "returncode": int(attempt.get("returncode", -1)),
+                    "stdout_tail": str(attempt.get("stdout_tail") or ""),
+                    "stderr_tail": str(attempt.get("stderr_tail") or ""),
+                    "summary_path": str(attempt.get("summary_path") or ""),
+                    "output_dir": str(attempt.get("output_dir") or ""),
+                    "exception": attempt.get("exception"),
+                },
+            )
+
+        try:
+            candidates = self._load_runtime_candidates(
+                output_dir=Path(str(attempt.get("output_dir") or "")),
+                observation=observation,
+                context=context,
+                object_pose=object_pose,
+            )
+        except Exception as exc:
+            return BackendResult(
+                backend_name=self.name,
+                available=True,
+                ok=False,
+                message="candidate_parse_failed",
+                diagnostics={
+                    **readiness,
+                    "python_bin": self.python_bin,
+                    "export_outputs": export_outputs,
+                    "command": attempt.get("command"),
+                    "returncode": int(attempt.get("returncode", -1)),
+                    "stdout_tail": str(attempt.get("stdout_tail") or ""),
+                    "stderr_tail": str(attempt.get("stderr_tail") or ""),
+                    "summary_path": str(attempt.get("summary_path") or ""),
+                    "output_dir": str(attempt.get("output_dir") or ""),
+                    "summary": dict(attempt.get("summary") or {}),
+                    "exception": repr(exc),
+                },
+            )
+        if not candidates:
+            return BackendResult(
+                backend_name=self.name,
+                available=True,
+                ok=False,
+                message="no_runtime_candidates",
+                diagnostics={
+                    **readiness,
+                    "python_bin": self.python_bin,
+                    "summary": dict(attempt.get("summary") or {}),
+                    "summary_path": str(attempt.get("summary_path") or ""),
+                    "output_dir": str(attempt.get("output_dir") or ""),
+                    "command": attempt.get("command"),
+                    "stdout_tail": str(attempt.get("stdout_tail") or ""),
+                    "stderr_tail": str(attempt.get("stderr_tail") or ""),
+                },
+            )
+        return BackendResult(
+            backend_name=self.name,
+            available=True,
+            ok=True,
+            payload=candidates,
+            message="runtime_success",
+            diagnostics={
+                **readiness,
+                "repo_path": self.repo_path,
+                "python_bin": self.python_bin,
+                "summary": dict(attempt.get("summary") or {}),
+                "summary_path": str(attempt.get("summary_path") or ""),
+                "output_dir": str(attempt.get("output_dir") or ""),
+                "command": attempt.get("command"),
+                "stdout_tail": str(attempt.get("stdout_tail") or ""),
+                "stderr_tail": str(attempt.get("stderr_tail") or ""),
+                "candidate_count": len(candidates),
+                "selected_backend": self.name,
+            },
+        )
+
+    def _run_external_attempt(
+        self,
+        *,
+        readiness: Dict[str, Any],
+        export_outputs: Dict[str, Any],
+        output_dir: Path,
+    ) -> Dict[str, Any]:
+        command = self._build_command(
+            repo_path=str(readiness.get("resolved_repo_path") or ""),
+            npz_path=str(export_outputs.get("npz_path") or ""),
+            output_dir=str(output_dir),
+            readiness=readiness,
+        )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(readiness.get("resolved_repo_path") or "") or None,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+                check=False,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "command": command,
+                "output_dir": str(output_dir),
+                "exception": repr(exc),
+            }
+
+        summary_path = output_dir / self.summary_filename
+        summary: Dict[str, Any] = {}
+        if summary_path.is_file():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except Exception:
+                summary = {}
+        return {
+            "ok": completed.returncode == 0 and summary_path.is_file(),
+            "command": command,
+            "output_dir": str(output_dir),
+            "summary_path": str(summary_path),
+            "summary": summary,
+            "returncode": int(completed.returncode),
+            "stdout_tail": (completed.stdout or "")[-4000:],
+            "stderr_tail": (completed.stderr or "")[-4000:],
+        }
+
+    def _build_command(
+        self,
+        *,
+        repo_path: str,
+        npz_path: str,
+        output_dir: str,
+        readiness: Dict[str, Any],
+    ) -> List[str]:
+        raise NotImplementedError
+
+    def _load_runtime_candidates(
+        self,
+        *,
+        output_dir: Path,
+        observation: PerceptionObservation,
+        context: Any | None,
+        object_pose: List[float] | None,
+    ) -> List[Dict[str, Any]]:
+        import numpy as np
+
+        camera_params = dict(observation.metadata or {}).get("camera_params") or {}
+        cam_to_world = _resolve_camera_to_world(camera_params)
+        sdk = None if context is None else getattr(context, "adapters", {}).get("sdk")
+        blackboard = None if context is None else getattr(context, "blackboard", None)
+        active_arm = "right"
+        if blackboard is not None and hasattr(blackboard, "get"):
+            active_arm = str(blackboard.get("active_arm") or active_arm)
+        if sdk is not None and hasattr(sdk, "active_arm") and getattr(sdk, "active_arm", None):
+            active_arm = str(getattr(sdk, "active_arm"))
+        pregrasp_distance = 0.10
+        if blackboard is not None and hasattr(blackboard, "get"):
+            pregrasp_distance = float(blackboard.get("pregrasp_distance", pregrasp_distance) or pregrasp_distance)
+        if sdk is not None and hasattr(sdk, "pregrasp_distance"):
+            pregrasp_distance = float(getattr(sdk, "pregrasp_distance", pregrasp_distance))
+        template_candidates = self._load_template_candidates(
+            sdk=sdk,
+            observation=observation,
+            context=context,
+            active_arm=active_arm,
+        )
+        bridge_template_candidates = list(template_candidates)
+        if not bridge_template_candidates:
+            bridge_template_candidates = self._load_template_candidates(
+                sdk=sdk,
+                observation=observation,
+                context=context,
+                active_arm=active_arm,
+                require_planner_success=False,
+                record_debug=False,
+            )
+            self.last_template_source_debug["bridge_donor_candidate_count"] = len(bridge_template_candidates)
+            self.last_template_source_debug["bridge_donor_labels"] = [
+                str(row.get("variant_label") or f"contact_{row.get('contact_point_id')}")
+                for row in list(bridge_template_candidates or [])
+            ]
+
+        candidates: List[Dict[str, Any]] = []
+        raw_contact_evidence: List[Dict[str, Any]] = []
+        for segment_path in sorted(output_dir.glob("segment_*_grasps.npz")):
+            segment_id = segment_path.stem.replace("segment_", "").replace("_grasps", "")
+            payload = np.load(segment_path)
+            grasp_key = "pred_grasps_cam" if "pred_grasps_cam" in payload.files else "grasps"
+            if grasp_key not in payload.files and "grasp_poses" in payload.files:
+                grasp_key = "grasp_poses"
+            score_key = "scores" if "scores" in payload.files else "grasp_conf"
+            if score_key not in payload.files and "confidences" in payload.files:
+                score_key = "confidences"
+            contact_key = "contact_pts" if "contact_pts" in payload.files else "contact_points"
+            grasp_mats = np.asarray(payload[grasp_key], dtype=np.float64) if grasp_key in payload.files else np.zeros((0, 4, 4))
+            scores = np.asarray(payload[score_key], dtype=np.float64).reshape(-1) if score_key in payload.files else np.zeros((0,), dtype=np.float64)
+            contact_pts = (
+                np.asarray(payload[contact_key], dtype=np.float64).reshape(-1, 3)
+                if contact_key in payload.files
+                else np.zeros((0, 3), dtype=np.float64)
+            )
+            if grasp_mats.ndim == 2 and grasp_mats.shape == (4, 4):
+                grasp_mats = grasp_mats.reshape(1, 4, 4)
+            for index in range(min(int(grasp_mats.shape[0]), self.max_candidates)):
+                grasp_mat = np.asarray(grasp_mats[index], dtype=np.float64).reshape(4, 4)
+                world_matrix = cam_to_world @ grasp_mat
+                pose = [float(v) for v in world_matrix[:3, 3].tolist()] + _rotation_matrix_to_quat_wxyz(world_matrix[:3, :3])
+                approach_axis = np.asarray(world_matrix[:3, 2], dtype=np.float64).reshape(3)
+                norm = float(np.linalg.norm(approach_axis))
+                if norm < 1e-6:
+                    approach_axis = np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
+                    norm = 1.0
+                approach_axis = approach_axis / norm
+                pregrasp_pose = list(pose)
+                pregrasp_pose[0] -= float(approach_axis[0]) * pregrasp_distance
+                pregrasp_pose[1] -= float(approach_axis[1]) * pregrasp_distance
+                pregrasp_pose[2] -= float(approach_axis[2]) * pregrasp_distance
+                planner_eval = self._evaluate_pose_pair(sdk, pregrasp_pose=pregrasp_pose, pose=pose)
+                contact_point: List[float] = [float(v) for v in pose[:3]]
+                if index < contact_pts.shape[0]:
+                    point_cam = np.append(contact_pts[index], 1.0)
+                    contact_world = (cam_to_world @ point_cam.reshape(4, 1)).reshape(-1)[:3]
+                    contact_point = [float(v) for v in contact_world.tolist()]
+                item = {
+                    "pose": pose,
+                    "pregrasp_pose": pregrasp_pose,
+                    "arm": active_arm,
+                    "score": float(scores[index]) if index < scores.shape[0] else 0.0,
+                    "variant_label": f"{self.name}_seg{segment_id}_{index}",
+                    "planner_status": planner_eval["planner_status"],
+                    "planner_waypoint_count": planner_eval["planner_waypoint_count"],
+                    "planner_debug": planner_eval["planner_debug"],
+                    "proposal_backend": self.name,
+                    "proposal_sources": [self.name],
+                    "contact_point": contact_point,
+                    "segment_id": str(segment_id),
+                }
+                item = self._apply_contact_geometry_semantics(
+                    candidate=item,
+                    sdk=sdk,
+                    object_pose=object_pose,
+                    semantic_source=f"{self.name}_geometry",
+                    semantic_priority=float(item["score"]),
+                )
+                candidates.append(item)
+                raw_contact_evidence.append(
+                    {
+                        "contact_point": list(contact_point),
+                        "score": float(item["score"]),
+                        "segment_id": str(segment_id),
+                        "source_index": int(index),
+                    }
+                )
+                if template_candidates:
+                    candidates.extend(
+                        self._build_template_transfer_candidates(
+                            raw_contact_point=contact_point,
+                            segment_id=str(segment_id),
+                            source_index=int(index),
+                            raw_score=float(item["score"]),
+                            active_arm=active_arm,
+                            pregrasp_distance=pregrasp_distance,
+                            sdk=sdk,
+                            templates=template_candidates,
+                            object_pose=object_pose,
+                        )
+                    )
+        if bridge_template_candidates and raw_contact_evidence:
+            candidates.extend(
+                self._build_guided_template_candidates(
+                    sdk=sdk,
+                    templates=bridge_template_candidates,
+                    raw_contact_evidence=raw_contact_evidence,
+                    active_arm=active_arm,
+                    object_pose=object_pose,
+                )
+            )
+        ranked = sorted(candidates, key=_sort_key_for_candidate)
+        return ranked[: self.max_candidates]
+
+
+class GraspNetBaselineBackend(_ExternalMatrixGraspBackend):
     name = "graspnet_baseline"
+    runner_script_name = "run_graspnet_baseline_headless.py"
+    output_subdir_name = "graspnet_baseline_headless"
+    summary_filename = "graspnet_baseline_summary.json"
 
-    def __init__(self, repo_path: str | None = None):
-        self.repo_path = str(repo_path or "")
+    def __init__(
+        self,
+        repo_path: str | None = None,
+        python_bin: str | None = None,
+        timeout_s: int = 180,
+        max_candidates: int = 12,
+        checkpoint_path: str | None = None,
+        num_point: int = 20000,
+        collision_thresh: float = -1.0,
+        voxel_size: float = 0.01,
+        template_delegate: Any | None = None,
+    ):
+        super().__init__(
+            repo_path=repo_path,
+            python_bin=python_bin,
+            timeout_s=timeout_s,
+            max_candidates=max_candidates,
+            template_delegate=template_delegate,
+        )
+        self.checkpoint_path = str(checkpoint_path or "")
+        self.num_point = max(int(num_point), 1024)
+        self.collision_thresh = float(collision_thresh)
+        self.voxel_size = float(voxel_size)
 
     def is_available(self) -> bool:
         readiness = self._readiness()
         return bool(readiness.get("available", False))
 
-    def propose_grasps(
-        self,
-        observation: PerceptionObservation,
-        *,
-        context: Any | None = None,
-        grounding: GroundingResult | None = None,
-        object_pose: List[float] | None = None,
-    ) -> BackendResult:
-        readiness = self._readiness()
-        return BackendResult(
-            backend_name=self.name,
-            available=bool(readiness.get("available", False)),
-            ok=False,
-            message=str(readiness.get("message", "integration_not_implemented")),
-            diagnostics={**readiness, "repo_path": self.repo_path},
+    def _candidate_checkpoint_paths(self, repo_path: Path | None) -> List[str]:
+        if repo_path is None or not repo_path.exists():
+            return []
+        matches = _find_matching_files(
+            repo_path,
+            [
+                "logs/**/*.tar",
+                "checkpoints/**/*.tar",
+                "**/checkpoint*.tar",
+            ],
         )
+        preferred_order = ["checkpoint-rs.tar", "checkpoint-kn.tar", "checkpoint.tar"]
+        ranked: List[str] = []
+        for filename in preferred_order:
+            ranked.extend([path for path in matches if path.endswith(filename)])
+        ranked.extend([path for path in matches if path not in ranked])
+        return ranked
+
+    def _resolved_checkpoint_path(self, repo_path: Path | None) -> Path | None:
+        explicit = _resolve_repo_path(self.checkpoint_path)
+        if explicit is not None and explicit.exists():
+            return explicit
+        candidates = self._candidate_checkpoint_paths(repo_path)
+        if not candidates:
+            return explicit if explicit is not None else None
+        return Path(candidates[0]).expanduser().resolve()
 
     def _readiness(self) -> Dict[str, Any]:
         repo_path = _resolve_repo_path(self.repo_path)
         repo_exists = bool(repo_path and repo_path.exists())
-        torch_available = _import_available("torch")
+        checkpoint_candidates = self._candidate_checkpoint_paths(repo_path)
+        resolved_checkpoint = self._resolved_checkpoint_path(repo_path)
+        import_status = _python_import_status(
+            ["torch", "open3d", "graspnetAPI", "PIL", "scipy"],
+            python_bin=self.python_bin,
+        )
+        required_modules = ("torch", "open3d", "graspnetAPI", "PIL", "scipy")
+        blockers: List[str] = []
+        if not repo_exists:
+            blockers.append("repo_missing")
+        if resolved_checkpoint is None or not resolved_checkpoint.exists():
+            blockers.append("checkpoint_missing")
+        if not import_status.get("python_bin_exists", False):
+            blockers.append("python_bin_missing")
+        for module_name in required_modules:
+            if not bool(dict(import_status.get("module_status") or {}).get(module_name, False)):
+                blockers.append(f"missing_dependency_{module_name.lower()}")
+        available = not blockers
         return {
-            "available": False,
-            "message": "repo_missing" if not repo_exists else "integration_not_implemented",
+            "available": available,
+            "message": blockers[0] if blockers else "ready_for_external_run",
+            "blockers": blockers,
+            "python_bin": self.python_bin,
+            "python_import_status": import_status,
             "repo_exists": repo_exists,
             "resolved_repo_path": None if repo_path is None else str(repo_path),
-            "torch_available": torch_available,
+            "checkpoint_candidates": checkpoint_candidates[:8],
+            "resolved_checkpoint_path": None if resolved_checkpoint is None else str(resolved_checkpoint),
         }
 
+    def _build_command(
+        self,
+        *,
+        repo_path: str,
+        npz_path: str,
+        output_dir: str,
+        readiness: Dict[str, Any],
+    ) -> List[str]:
+        runner_path = _repo_root() / "script_runtime" / "runners" / self.runner_script_name
+        command = [
+            self.python_bin,
+            str(runner_path),
+            "--repo-path",
+            str(Path(repo_path).expanduser().resolve()),
+            "--npz-path",
+            str(Path(npz_path).expanduser().resolve()),
+            "--checkpoint-path",
+            str(Path(str(readiness.get("resolved_checkpoint_path") or "")).expanduser().resolve()),
+            "--out-dir",
+            str(Path(output_dir).expanduser().resolve()),
+            "--num-point",
+            str(self.num_point),
+            "--max-grasps",
+            str(self.max_candidates),
+            "--collision-thresh",
+            str(self.collision_thresh),
+            "--voxel-size",
+            str(self.voxel_size),
+        ]
+        return command
 
-class GraspGenBackend(GraspProposalBackend):
+
+class GraspGenBackend(_ExternalMatrixGraspBackend):
     name = "graspgen"
+    runner_script_name = "run_graspgen_headless.py"
+    output_subdir_name = "graspgen_headless"
+    summary_filename = "graspgen_summary.json"
 
-    def __init__(self, repo_path: str | None = None):
-        self.repo_path = str(repo_path or "")
+    def __init__(
+        self,
+        repo_path: str | None = None,
+        python_bin: str | None = None,
+        timeout_s: int = 180,
+        max_candidates: int = 12,
+        gripper_config: str | None = None,
+        grasp_threshold: float = -1.0,
+        num_grasps: int = 200,
+        topk_num_grasps: int = 100,
+        min_grasps: int = 40,
+        max_tries: int = 6,
+        remove_outliers: bool = True,
+        template_delegate: Any | None = None,
+    ):
+        super().__init__(
+            repo_path=repo_path,
+            python_bin=python_bin,
+            timeout_s=timeout_s,
+            max_candidates=max_candidates,
+            template_delegate=template_delegate,
+        )
+        self.gripper_config = str(gripper_config or "")
+        self.grasp_threshold = float(grasp_threshold)
+        self.num_grasps = max(int(num_grasps), 1)
+        self.topk_num_grasps = int(topk_num_grasps)
+        self.min_grasps = max(int(min_grasps), 1)
+        self.max_tries = max(int(max_tries), 1)
+        self.remove_outliers = bool(remove_outliers)
 
     def is_available(self) -> bool:
         readiness = self._readiness()
         return bool(readiness.get("available", False))
 
-    def propose_grasps(
-        self,
-        observation: PerceptionObservation,
-        *,
-        context: Any | None = None,
-        grounding: GroundingResult | None = None,
-        object_pose: List[float] | None = None,
-    ) -> BackendResult:
-        readiness = self._readiness()
-        return BackendResult(
-            backend_name=self.name,
-            available=bool(readiness.get("available", False)),
-            ok=False,
-            message=str(readiness.get("message", "integration_not_implemented")),
-            diagnostics={**readiness, "repo_path": self.repo_path},
-        )
+    @staticmethod
+    def _resolve_graspgen_checkpoint(checkpoint_text: str, config_path: Path) -> Path | None:
+        text = str(checkpoint_text or "").strip()
+        if not text:
+            return None
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = config_path.parent / path
+        return path.resolve()
+
+    def _candidate_gripper_configs(self, repo_path: Path | None) -> List[Path]:
+        candidates: List[Path] = []
+        explicit = _resolve_repo_path(self.gripper_config)
+        if explicit is not None:
+            candidates.append(explicit)
+        roots = self._candidate_models_roots(repo_path)
+        preferred_names = [
+            "graspgen_robotiq_2f_140.yml",
+            "graspgen_franka_panda.yml",
+            "graspgen_single_suction_cup_30mm.yml",
+        ]
+        for root in roots:
+            for filename in preferred_names:
+                candidates.append((root / "checkpoints" / filename).resolve())
+        deduped: List[Path] = []
+        seen = set()
+        for path in candidates:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
+
+    @staticmethod
+    def _candidate_models_roots(repo_path: Path | None) -> List[Path]:
+        roots: List[Path] = []
+        if repo_path is not None:
+            roots.append((repo_path.parent / "GraspGenModels").resolve())
+            roots.append((repo_path / "GraspGenModels").resolve())
+        roots.append((_repo_root() / "third_party" / "GraspGenModels").resolve())
+        deduped: List[Path] = []
+        seen = set()
+        for path in roots:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
+
+    def _inspect_gripper_config(self, config_path: Path | None) -> Dict[str, Any]:
+        if config_path is None or not config_path.exists():
+            return {
+                "config_exists": False,
+                "config_valid": False,
+                "message": "gripper_config_missing",
+            }
+        try:
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:
+            return {
+                "config_exists": True,
+                "config_valid": False,
+                "message": f"invalid_gripper_config:{type(exc).__name__}",
+                "error": repr(exc),
+            }
+        eval_cfg = dict(payload.get("eval") or {})
+        discriminator_cfg = dict(payload.get("discriminator") or {})
+        eval_checkpoint = self._resolve_graspgen_checkpoint(eval_cfg.get("checkpoint", ""), config_path)
+        discriminator_checkpoint = self._resolve_graspgen_checkpoint(discriminator_cfg.get("checkpoint", ""), config_path)
+        config_valid = eval_checkpoint is not None and discriminator_checkpoint is not None
+        return {
+            "config_exists": True,
+            "config_valid": config_valid,
+            "message": "" if config_valid else "invalid_gripper_config",
+            "resolved_gripper_config": str(config_path.resolve()),
+            "resolved_eval_checkpoint": None if eval_checkpoint is None else str(eval_checkpoint),
+            "resolved_discriminator_checkpoint": None if discriminator_checkpoint is None else str(discriminator_checkpoint),
+            "eval_checkpoint_exists": bool(eval_checkpoint and eval_checkpoint.exists()),
+            "discriminator_checkpoint_exists": bool(discriminator_checkpoint and discriminator_checkpoint.exists()),
+        }
 
     def _readiness(self) -> Dict[str, Any]:
         repo_path = _resolve_repo_path(self.repo_path)
         repo_exists = bool(repo_path and repo_path.exists())
-        torch_available = _import_available("torch")
+        models_root_candidates = self._candidate_models_roots(repo_path)
+        existing_models_roots = [str(path) for path in models_root_candidates if path.exists()]
+        gripper_candidates = self._candidate_gripper_configs(repo_path)
+        selected_candidate = next((path for path in gripper_candidates if path.exists()), gripper_candidates[0] if gripper_candidates else None)
+        config_status = self._inspect_gripper_config(selected_candidate)
+        import_status = _python_import_status(
+            ["torch", "omegaconf", "trimesh"],
+            python_bin=self.python_bin,
+        )
+        blockers: List[str] = []
+        if not repo_exists:
+            blockers.append("repo_missing")
+        if not bool(config_status.get("config_exists", False)) and not existing_models_roots and not self.gripper_config:
+            blockers.append("models_repo_missing")
+        elif not bool(config_status.get("config_exists", False)):
+            blockers.append("gripper_config_missing")
+        elif not bool(config_status.get("config_valid", False)):
+            blockers.append(str(config_status.get("message") or "invalid_gripper_config"))
+        elif not bool(config_status.get("eval_checkpoint_exists", False)):
+            blockers.append("generator_checkpoint_missing")
+        elif not bool(config_status.get("discriminator_checkpoint_exists", False)):
+            blockers.append("discriminator_checkpoint_missing")
+        if not import_status.get("python_bin_exists", False):
+            blockers.append("python_bin_missing")
+        for module_name in ("torch", "omegaconf", "trimesh"):
+            if not bool(dict(import_status.get("module_status") or {}).get(module_name, False)):
+                blockers.append(f"missing_dependency_{module_name.lower()}")
+        available = not blockers
+        config_message = str(config_status.get("message") or "")
+        resolved_message = blockers[0] if blockers else "ready_for_external_run"
         return {
-            "available": False,
-            "message": "repo_missing" if not repo_exists else "integration_not_implemented",
+            "available": available,
+            "message": resolved_message,
+            "blockers": blockers,
+            "python_bin": self.python_bin,
+            "python_import_status": import_status,
             "repo_exists": repo_exists,
             "resolved_repo_path": None if repo_path is None else str(repo_path),
-            "torch_available": torch_available,
+            "models_root_candidates": [str(path) for path in models_root_candidates],
+            "existing_models_roots": existing_models_roots,
+            "gripper_config_candidates": [str(path) for path in gripper_candidates[:8]],
+            **config_status,
+            "config_message": config_message,
+            "message": resolved_message,
         }
+
+    def _build_command(
+        self,
+        *,
+        repo_path: str,
+        npz_path: str,
+        output_dir: str,
+        readiness: Dict[str, Any],
+    ) -> List[str]:
+        runner_path = _repo_root() / "script_runtime" / "runners" / self.runner_script_name
+        command = [
+            self.python_bin,
+            str(runner_path),
+            "--repo-path",
+            str(Path(repo_path).expanduser().resolve()),
+            "--npz-path",
+            str(Path(npz_path).expanduser().resolve()),
+            "--gripper-config",
+            str(Path(str(readiness.get("resolved_gripper_config") or "")).expanduser().resolve()),
+            "--out-dir",
+            str(Path(output_dir).expanduser().resolve()),
+            "--num-grasps",
+            str(self.num_grasps),
+            "--topk-num-grasps",
+            str(self.topk_num_grasps),
+            "--max-grasps",
+            str(self.max_candidates),
+            "--grasp-threshold",
+            str(self.grasp_threshold),
+            "--min-grasps",
+            str(self.min_grasps),
+            "--max-tries",
+            str(self.max_tries),
+        ]
+        if not self.remove_outliers:
+            command.append("--no-remove-outliers")
+        return command
 
 
 class DelegateGraspProposalBackend(GraspProposalBackend):
@@ -3573,13 +4160,14 @@ class FMFirstGraspStackAdapter(PerceptionAdapter):
             self.last_grasp_diagnostics = diagnostics
             selected_backend = str(reranked[0].get("proposal_backend") or reranked[0].get("proposal_sources", ["multi_backend_merge"])[0])
             selected_backend_kind = "fm_backend" if selected_backend not in {"oracle_feasibility", "depth_synthesized"} else "fallback_delegate"
-            contact_runtime_ok = any(
-                str(row.get("backend_name") or "") == "contact_graspnet" and bool(row.get("ok", False))
+            any_fm_backend_ok = any(
+                str(row.get("backend_name") or "") not in {"oracle_feasibility", "depth_synthesized"}
+                and bool(row.get("ok", False))
                 for row in diagnostics
             )
             if selected_backend_kind == "fm_backend":
                 fallback_reason = ""
-            elif contact_runtime_ok:
+            elif any_fm_backend_ok:
                 fallback_reason = "fallback_selected_over_fm_backend"
             else:
                 fallback_reason = self._first_backend_failure(diagnostics, preferred_backend="contact_graspnet")
@@ -3703,7 +4291,21 @@ def build_default_fm_first_grasp_stack(
     contact_graspnet_timeout_s: int = 180,
     contact_graspnet_max_candidates: int = 12,
     graspnet_repo: str | None = None,
+    graspnet_python_bin: str | None = None,
+    graspnet_timeout_s: int = 180,
+    graspnet_max_candidates: int = 12,
+    graspnet_checkpoint_path: str | None = None,
     graspgen_repo: str | None = None,
+    graspgen_python_bin: str | None = None,
+    graspgen_timeout_s: int = 180,
+    graspgen_max_candidates: int = 12,
+    graspgen_gripper_config: str | None = None,
+    graspgen_grasp_threshold: float = -1.0,
+    graspgen_num_grasps: int = 200,
+    graspgen_topk_num_grasps: int = 100,
+    graspgen_min_grasps: int = 40,
+    graspgen_max_tries: int = 6,
+    graspgen_remove_outliers: bool = True,
     include_grounded_sam2: bool = True,
     include_task_goal_grounder: bool = True,
     include_foundationpose: bool = True,
@@ -3768,9 +4370,33 @@ def build_default_fm_first_grasp_stack(
             )
         )
     if include_graspnet_baseline:
-        grasp_backends.append(GraspNetBaselineBackend(repo_path=graspnet_repo))
+        grasp_backends.append(
+            GraspNetBaselineBackend(
+                repo_path=graspnet_repo,
+                python_bin=graspnet_python_bin,
+                timeout_s=graspnet_timeout_s,
+                max_candidates=graspnet_max_candidates,
+                checkpoint_path=graspnet_checkpoint_path,
+                template_delegate=robotwin_depth_provider,
+            )
+        )
     if include_graspgen:
-        grasp_backends.append(GraspGenBackend(repo_path=graspgen_repo))
+        grasp_backends.append(
+            GraspGenBackend(
+                repo_path=graspgen_repo,
+                python_bin=graspgen_python_bin,
+                timeout_s=graspgen_timeout_s,
+                max_candidates=graspgen_max_candidates,
+                gripper_config=graspgen_gripper_config,
+                grasp_threshold=graspgen_grasp_threshold,
+                num_grasps=graspgen_num_grasps,
+                topk_num_grasps=graspgen_topk_num_grasps,
+                min_grasps=graspgen_min_grasps,
+                max_tries=graspgen_max_tries,
+                remove_outliers=graspgen_remove_outliers,
+                template_delegate=robotwin_depth_provider,
+            )
+        )
     if include_oracle_grasp and oracle_backend is not None:
         grasp_backends.append(DelegateGraspProposalBackend("oracle_feasibility", oracle_backend))
     if include_depth_grasp and robotwin_depth_provider is not None:

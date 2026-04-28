@@ -6,7 +6,14 @@ from typing import Any, Dict, Optional
 
 from script_runtime.core.failure_codes import FailureCode
 from script_runtime.core.result_types import SkillResult
-from script_runtime.core.skill_base import Skill, SkillContext, request_world_refresh
+from script_runtime.core.skill_base import (
+    Skill,
+    SkillContext,
+    begin_grasp_attempt,
+    grasp_attempt_trace_context,
+    request_world_refresh,
+    sync_active_arm_to_candidate,
+)
 
 
 def _candidate_identity(candidate: Dict[str, Any]) -> tuple:
@@ -25,6 +32,14 @@ def _find_active_candidate_index(candidates: list[Dict[str, Any]], active_candid
         if _candidate_identity(candidate) == active_key:
             return index
     return None
+
+
+def _candidate_pose_invalid(candidate: Dict[str, Any]) -> bool:
+    pose = list(candidate.get("pose") or [])
+    if len(pose) >= 3 and all(abs(float(value) + 1.0) <= 1e-6 for value in pose[:3]):
+        return True
+    pregrasp = list(candidate.get("pregrasp_pose") or [])
+    return bool(len(pregrasp) >= 3 and all(abs(float(value) + 1.0) <= 1e-6 for value in pregrasp[:3]))
 
 
 class SafeRetreat(Skill):
@@ -88,24 +103,58 @@ class RetryWithNextCandidate(Skill):
         super().__init__(name="RetryWithNextCandidate", timeout_s=0.2, failure_code=FailureCode.NO_GRASP_CANDIDATE)
 
     def run(self, context: SkillContext) -> SkillResult:
+        refresh = dict(context.blackboard.get("last_grasp_candidate_refresh") or {})
         candidates = list(context.world_state.learned.grasp_candidates)
-        if len(candidates) <= 1:
+        active_candidate = dict(context.blackboard.get("active_grasp_candidate") or {})
+        failed_candidate = dict(context.blackboard.get("last_failed_grasp_candidate") or {})
+        forced_rebuild = False
+        rebuild_reason = ""
+
+        rejected_anchor = failed_candidate or active_candidate
+        if self._should_force_perception_rebuild(candidates=candidates, rejected_anchor=rejected_anchor, refresh=refresh):
+            forced_rebuild = True
+            rebuild_reason = "post_execute_candidates_degraded"
+            rebuild = self._force_perception_rebuild(context)
+            if rebuild.status.value != "SUCCESS":
+                return SkillResult.failure(
+                    FailureCode.NO_GRASP_CANDIDATE,
+                    message="Forced perception rebuild failed before retry",
+                    forced_perception_rebuild=True,
+                    forced_perception_rebuild_reason=rebuild_reason,
+                    rebuild_result=rebuild.payload,
+                    grasp_candidate_refresh=refresh,
+                    **grasp_attempt_trace_context(context),
+                )
+            candidates = list(context.blackboard.get("grasp_candidates", context.world_state.learned.grasp_candidates) or [])
+            if not rejected_anchor:
+                rejected_anchor = dict(context.blackboard.get("active_grasp_candidate") or {})
+
+        if len(candidates) <= 1 and not forced_rebuild:
             return SkillResult.failure(
                 FailureCode.NO_GRASP_CANDIDATE,
                 message="No next candidate available",
-                grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+                grasp_candidate_refresh=refresh,
+                forced_perception_rebuild=False,
+                **grasp_attempt_trace_context(context),
             )
-        active_candidate = dict(context.blackboard.get("active_grasp_candidate") or {})
-        active_index = _find_active_candidate_index(candidates, active_candidate)
-        pop_index = 0 if active_index is None else active_index
-        rejected = [candidates.pop(pop_index)]
+
+        rejected = []
+        rejected_index = _find_active_candidate_index(candidates, rejected_anchor)
+        if rejected_index is not None:
+            rejected.append(candidates.pop(rejected_index))
+        elif not forced_rebuild and candidates:
+            rejected.append(candidates.pop(0))
+
         next_index = self._next_feasible_index(candidates)
         if next_index is None:
             return SkillResult.failure(
                 FailureCode.NO_GRASP_CANDIDATE,
                 message="No planner-feasible next candidate available",
                 rejected_candidates=rejected,
-                grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+                grasp_candidate_refresh=refresh,
+                forced_perception_rebuild=forced_rebuild,
+                forced_perception_rebuild_reason=rebuild_reason,
+                **grasp_attempt_trace_context(context),
             )
         if next_index > 0:
             rejected.extend(candidates[:next_index])
@@ -113,14 +162,25 @@ class RetryWithNextCandidate(Skill):
         next_candidate = candidates[0]
         context.blackboard.update_world(learned={"grasp_candidates": candidates})
         context.blackboard.set("active_grasp_candidate", next_candidate)
+        sync_active_arm_to_candidate(context, next_candidate)
         if next_candidate.get("pose") is not None:
             context.blackboard.set("active_grasp_pose", next_candidate["pose"])
         if next_candidate.get("pregrasp_pose") is not None:
             context.blackboard.set("pregrasp_pose", next_candidate["pregrasp_pose"])
+        begin_grasp_attempt(
+            context,
+            next_candidate,
+            source="RetryWithNextCandidate",
+            forced_perception_rebuild=forced_rebuild,
+            rebuild_reason=rebuild_reason,
+        )
         return SkillResult.success(
             next_candidate=next_candidate,
             rejected_candidates=rejected,
-            grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+            grasp_candidate_refresh=refresh,
+            forced_perception_rebuild=forced_rebuild,
+            forced_perception_rebuild_reason=rebuild_reason,
+            **grasp_attempt_trace_context(context),
         )
 
     @staticmethod
@@ -136,6 +196,36 @@ class RetryWithNextCandidate(Skill):
             if status not in {"Failure", "Fail"} and best_unknown is None:
                 best_unknown = index
         return best_unknown
+
+    def _should_force_perception_rebuild(
+        self,
+        *,
+        candidates: list[Dict[str, Any]],
+        rejected_anchor: Dict[str, Any],
+        refresh: Dict[str, Any],
+    ) -> bool:
+        if str(refresh.get("refresh_reason") or "") != "post_ExecuteGraspPhase":
+            return False
+        remaining = list(candidates)
+        rejected_index = _find_active_candidate_index(remaining, rejected_anchor)
+        if rejected_index is not None:
+            remaining.pop(rejected_index)
+        elif remaining:
+            remaining = remaining[1:]
+        if not remaining:
+            return True
+        if self._next_feasible_index(remaining) is None:
+            return True
+        return all(_candidate_pose_invalid(candidate) for candidate in remaining)
+
+    def _force_perception_rebuild(self, context: SkillContext) -> SkillResult:
+        from script_runtime.skills.perception.primitives import GetGraspCandidates, GetObjectPose
+
+        pose_result = GetObjectPose().run(context)
+        if pose_result.status.value != "SUCCESS":
+            return pose_result
+        candidate_result = GetGraspCandidates().run(context)
+        return candidate_result
 
 
 class HumanTakeover(Skill):

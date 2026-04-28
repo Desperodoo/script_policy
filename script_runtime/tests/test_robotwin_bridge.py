@@ -1,6 +1,7 @@
 from script_runtime.planning import normalize_planner_statuses
 from script_runtime.adapters.robotwin_bridge import RoboTwinBridge
 from script_runtime.core.blackboard import TaskBlackboard, WorldState
+from script_runtime.core.skill_base import set_pending_refresh_reason
 from types import SimpleNamespace
 
 
@@ -79,6 +80,89 @@ def test_resolve_active_grasp_candidate_preserves_selected_contact():
     ]
 
     active = bridge._resolve_active_grasp_candidate(blackboard, candidates)
+
+    assert active["variant_label"] == "contact_1"
+    assert active["contact_point_id"] == 1
+
+
+def test_resolve_active_grasp_candidate_promotes_feasible_candidate_over_stale_failed_selection():
+    bridge = RoboTwinBridge()
+    blackboard = TaskBlackboard(WorldState())
+    blackboard.set(
+        "active_grasp_candidate",
+        {
+            "variant_label": "contact_0",
+            "contact_point_id": 0,
+            "planner_status": "Failure",
+            "pose": [0.1, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+        },
+    )
+    candidates = [
+        {
+            "variant_label": "contact_0",
+            "contact_point_id": 0,
+            "planner_status": "Failure",
+            "pose": [0.1, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+            "pregrasp_pose": [0.1, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0],
+        },
+        {
+            "variant_label": "contact_1",
+            "contact_point_id": 1,
+            "planner_status": "Success",
+            "pose": [0.2, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+            "pregrasp_pose": [0.2, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0],
+        },
+    ]
+
+    active = bridge._resolve_active_grasp_candidate(blackboard, candidates)
+
+    assert active["variant_label"] == "contact_1"
+    assert active["contact_point_id"] == 1
+
+
+def test_resolve_active_grasp_candidate_prefers_current_attempt_candidate():
+    bridge = RoboTwinBridge()
+    blackboard = TaskBlackboard(WorldState())
+    blackboard.set(
+        "active_grasp_candidate",
+        {
+            "variant_label": "contact_0",
+            "contact_point_id": 0,
+            "planner_status": "Failure",
+            "pose": [0.1, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+        },
+    )
+    blackboard.set(
+        "grasp_attempt_candidate",
+        {
+            "variant_label": "contact_1",
+            "contact_point_id": 1,
+            "planner_status": "Success",
+            "pose": [0.2, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+        },
+    )
+    candidates = [
+        {
+            "variant_label": "contact_0",
+            "contact_point_id": 0,
+            "planner_status": "Failure",
+            "pose": [0.1, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+            "pregrasp_pose": [0.1, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0],
+        },
+        {
+            "variant_label": "contact_1",
+            "contact_point_id": 1,
+            "planner_status": "Success",
+            "pose": [0.2, 0.0, 0.3, 0.0, 0.0, 0.0, 1.0],
+            "pregrasp_pose": [0.2, 0.0, 0.4, 0.0, 0.0, 0.0, 1.0],
+        },
+    ]
+
+    active = bridge._resolve_active_grasp_candidate(
+        blackboard,
+        candidates,
+        attempt_candidate=dict(blackboard.get("grasp_attempt_candidate") or {}),
+    )
 
     assert active["variant_label"] == "contact_1"
     assert active["contact_point_id"] == 1
@@ -262,6 +346,81 @@ def test_score_pose_candidate_blends_predicted_alignment_with_current_error():
     assert scored["score_adjust"] < 0.0
 
 
+def test_get_trace_snapshot_includes_support_context_from_blackboard():
+    bridge = RoboTwinBridge(task_name="place_can_basket")
+    bridge.env = SimpleNamespace()
+    bridge.blackboard = TaskBlackboard(WorldState())
+    bridge.blackboard.set("support_arm", "left")
+    bridge.blackboard.set("support_target_frame", "robotwin::basket")
+    bridge.blackboard.set("support_pregrasp_pose_source", "active_grasp_candidate:contact_2")
+    bridge.blackboard.set("support_regrasp_substage", "support_pregrasp_motion")
+    bridge.get_status = lambda: {"eef_pose": [0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0], "active_arm": "left"}  # type: ignore[method-assign]
+    bridge.get_object_pose = lambda: [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+    bridge.get_target_center_pose = lambda: [0.7, 0.8, 0.9, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+    bridge.get_grasp_diagnostics = lambda: {"is_grasped": False}  # type: ignore[method-assign]
+    bridge._support_target_pose = lambda: None  # type: ignore[method-assign]
+
+    snapshot = bridge.get_trace_snapshot(label="support_probe")
+
+    assert snapshot["support_arm"] == "left"
+    assert snapshot["support_target_frame"] == "robotwin::basket"
+    assert snapshot["support_pregrasp_pose_source"] == "active_grasp_candidate:contact_2"
+    assert snapshot["support_regrasp_substage"] == "support_pregrasp_motion"
+    assert snapshot["object_to_target_center_delta"]["xy_norm"] > 0.0
+
+
+def test_get_trace_snapshot_exposes_object_to_support_pose_delta():
+    bridge = RoboTwinBridge(task_name="place_can_basket")
+    bridge.env = SimpleNamespace()
+    bridge.blackboard = TaskBlackboard(WorldState())
+    bridge.get_status = lambda: {"eef_pose": [0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0], "active_arm": "left"}  # type: ignore[method-assign]
+    bridge.get_object_pose = lambda: [0.42, 0.51, 0.63, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+    bridge.get_target_center_pose = lambda: [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+    bridge.get_grasp_diagnostics = lambda: {"is_grasped": True}  # type: ignore[method-assign]
+    bridge._support_target_pose = lambda: [0.4, 0.5, 0.61, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+
+    snapshot = bridge.get_trace_snapshot(label="support_completion")
+
+    assert round(snapshot["object_to_support_pose_delta"]["dx"], 3) == 0.02
+    assert round(snapshot["object_to_support_pose_delta"]["dy"], 3) == 0.01
+    assert round(snapshot["object_to_support_pose_delta"]["dz"], 3) == 0.02
+    assert snapshot["object_to_support_pose_delta"]["xy_norm"] > 0.0
+
+
+def test_refresh_world_retains_previous_support_candidate_when_post_go_pregrasp_refresh_goes_empty():
+    bridge = RoboTwinBridge(task_name="place_can_basket", active_arm="right")
+    blackboard = TaskBlackboard(WorldState())
+    previous_active = {
+        "variant_label": "contact_1",
+        "contact_point_id": 1,
+        "arm": "right",
+        "pose": [0.3, -0.1, 0.8, 1.0, 0.0, 0.0, 0.0],
+        "pregrasp_pose": [0.25, -0.1, 0.85, 1.0, 0.0, 0.0, 0.0],
+        "planner_status": "Success",
+    }
+    blackboard.set("probe_support_regrasp_active", True)
+    blackboard.set("active_grasp_candidate", previous_active)
+    blackboard.set("active_grasp_pose", previous_active["pose"])
+    blackboard.set("pregrasp_pose", previous_active["pregrasp_pose"])
+    bridge.get_status = lambda: {"active_arm": "right", "eef_pose": [0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0]}  # type: ignore[method-assign]
+    bridge.get_object_pose = lambda: [0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+    bridge.get_place_pose = lambda: [0.7, 0.8, 0.9, 1.0, 0.0, 0.0, 0.0]  # type: ignore[method-assign]
+    bridge.is_grasped = lambda: False  # type: ignore[method-assign]
+    bridge.get_grasp_candidates = lambda: []  # type: ignore[method-assign]
+    bridge._refresh_active_targets = lambda: None  # type: ignore[method-assign]
+    bridge._current_grasp_semantic_context = lambda: {}  # type: ignore[method-assign]
+    bridge.target_attr = "basket"
+    set_pending_refresh_reason(blackboard, "post_GoPregrasp")
+
+    bridge.refresh_world(blackboard)
+
+    assert blackboard.get("active_grasp_candidate")["variant_label"] == "contact_1"
+    assert blackboard.get("pregrasp_pose") == previous_active["pregrasp_pose"]
+    assert blackboard.get("support_pregrasp_pose_source") == "retained_previous_active_candidate:contact_1"
+    refresh = blackboard.get("last_grasp_candidate_refresh")
+    assert refresh["current_active_candidate"]["label"] == "contact_1"
+
+
 def test_preferred_contact_family_uses_contact_groups_when_reference_available():
     family = RoboTwinBridge._preferred_contact_family(
         2,
@@ -353,8 +512,50 @@ def test_handover_block_task_specific_contact_family_splits_source_and_receiver_
     assert compatibility_right[5] == "preferred"
 
 
+def test_open_microwave_task_specific_contacts_prefer_handle_family():
+    bridge = RoboTwinBridge(task_name="open_microwave", active_arm="left")
+    bridge._object_model_name = lambda: "044_microwave"  # type: ignore[method-assign]
+    bridge._object_model_id = lambda: 0  # type: ignore[method-assign]
+    bridge._load_object_point_metadata = lambda: {  # type: ignore[method-assign]
+        "contact_description": "Microwave handle contacts",
+        "contact_groups": [],
+    }
+    candidates = [
+        {"variant_label": "contact_0", "contact_point_id": 0, "task_compatibility": "compatible"},
+        {"variant_label": "contact_2", "contact_point_id": 2, "task_compatibility": "compatible"},
+        {"variant_label": "contact_4", "contact_point_id": 4, "task_compatibility": "compatible"},
+        {"variant_label": "contact_5", "contact_point_id": 5, "task_compatibility": "compatible"},
+    ]
+
+    annotated = bridge._annotate_task_specific_grasp_candidates(candidates, arm="left")
+    compatibility = {item["contact_point_id"]: item["task_compatibility"] for item in annotated}
+    affordances = {item["contact_point_id"]: item["affordance_type"] for item in annotated}
+
+    assert compatibility[0] == "preferred"
+    assert compatibility[2] == "preferred"
+    assert compatibility[4] == "preferred"
+    assert compatibility[5] == "incompatible"
+    assert affordances[0] == "handle"
+
+
 def test_build_grasp_candidate_refresh_diagnostic_marks_failure_to_success_flip():
     bridge = RoboTwinBridge(task_name="place_container_plate", active_arm="left")
+    bridge.blackboard = TaskBlackboard(WorldState())
+    bridge.blackboard.set(
+        "grasp_attempt_candidate",
+        {"variant_label": "contact_1", "contact_point_id": 1, "arm": "left"},
+    )
+    bridge.blackboard.set(
+        "grasp_attempt_initial_candidate",
+        {"variant_label": "contact_0", "contact_point_id": 0, "arm": "left"},
+    )
+    bridge.blackboard.set("grasp_attempt_candidate_identity", "contact:left:1:contact_1")
+    bridge.blackboard.set("grasp_attempt_candidate_source", "ReselectGraspAfterPregrasp")
+    bridge.blackboard.set("grasp_attempt_reselected", True)
+    bridge.blackboard.set("grasp_attempt_reselection_node", "probe_reselect_grasp_after_pregrasp")
+    bridge.blackboard.set("grasp_attempt_reselection_skill", "ReselectGraspAfterPregrasp")
+    bridge.blackboard.set("grasp_attempt_forced_perception_rebuild", True)
+    bridge.blackboard.set("grasp_attempt_forced_perception_rebuild_reason", "post_execute_candidates_degraded")
 
     previous_candidates = [
         {
@@ -421,3 +622,8 @@ def test_build_grasp_candidate_refresh_diagnostic_marks_failure_to_success_flip(
     assert improved["previous_status"] == "Failure"
     assert improved["current_status"] == "Success"
     assert improved["current"]["contact_point_id"] == 1
+    assert diagnostic["grasp_attempt_candidate"]["contact_point_id"] == 1
+    assert diagnostic["grasp_attempt_initial_candidate"]["contact_point_id"] == 0
+    assert diagnostic["grasp_attempt_reselected"] is True
+    assert diagnostic["grasp_attempt_reselection_node"] == "probe_reselect_grasp_after_pregrasp"
+    assert diagnostic["grasp_attempt_forced_perception_rebuild"] is True

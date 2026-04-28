@@ -6,7 +6,15 @@ from typing import Optional
 
 from script_runtime.core.failure_codes import FailureCode
 from script_runtime.core.result_types import RecoveryAction, SkillResult
-from script_runtime.core.skill_base import Skill, SkillContext, request_world_refresh
+from script_runtime.core.skill_base import (
+    ensure_grasp_attempt_candidate,
+    Skill,
+    SkillContext,
+    grasp_attempt_trace_context,
+    request_world_refresh,
+    set_support_regrasp_substage,
+    support_regrasp_trace_context,
+)
 
 
 def _trace_snapshot(sdk, label: str):
@@ -59,6 +67,7 @@ class PrepareGripperForGrasp(Skill):
 
     def run(self, context: SkillContext) -> SkillResult:
         sdk = context.adapters["sdk"]
+        set_support_regrasp_substage(context, "support_pregrasp_motion")
         state_before = _trace_snapshot(sdk, "prepare_gripper_before")
         width = self.width
         if width is None:
@@ -79,6 +88,14 @@ class PrepareGripperForGrasp(Skill):
             state_after=_trace_snapshot(sdk, "prepare_gripper_after"),
             grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
         )
+
+    def trace_payload(self, context: SkillContext, result: SkillResult):
+        payload = {
+            "message": result.message,
+            "payload": result.payload,
+        }
+        payload.update(support_regrasp_trace_context(context))
+        return payload
 
 
 class CloseGripper(Skill):
@@ -138,6 +155,10 @@ class ExecuteGraspPhase(Skill):
         if not target_pose:
             return SkillResult.failure(FailureCode.NO_IK, message="Missing active grasp pose")
 
+        active_candidate = dict(context.blackboard.get("active_grasp_candidate") or {})
+        ensure_grasp_attempt_candidate(context, active_candidate, source="ExecuteGraspPhase")
+        attempt_context = grasp_attempt_trace_context(context)
+        set_support_regrasp_substage(context, "support_grasp_closure")
         sdk = context.adapters["sdk"]
         result = sdk.execute_grasp_phase(target_pose, context=context)
         request_world_refresh(context, sdk, reason="post_ExecuteGraspPhase")
@@ -151,14 +172,14 @@ class ExecuteGraspPhase(Skill):
         context.blackboard.update_world(scene={"grasped": grasped})
 
         if not result.get("ok", False) or not grasped:
-            active_candidate = context.blackboard.get("active_grasp_candidate")
-            if active_candidate is not None:
+            if active_candidate:
                 context.blackboard.set("last_failed_grasp_candidate", dict(active_candidate))
             return SkillResult.failure(
                 FailureCode.GRASP_FAIL,
                 message=result.get("message", "Grasp phase did not secure object"),
                 sdk_result=result,
                 grasp_candidate_refresh=grasp_refresh,
+                **attempt_context,
             )
         context.blackboard.delete("last_failed_grasp_candidate")
         eef_pose = list(context.world_state.robot.eef_pose)
@@ -176,18 +197,22 @@ class ExecuteGraspPhase(Skill):
             sdk_result=result,
             grasp_diagnostics=result.get("grasp_diagnostics"),
             grasp_candidate_refresh=grasp_refresh,
+            **attempt_context,
         )
 
     def recover(self, context: SkillContext):
         return RecoveryAction(name="RetryWithNextCandidate")
 
     def trace_payload(self, context: SkillContext, result: SkillResult):
-        return {
+        payload = {
             "message": result.message,
             "payload": result.payload,
             "eef_pose": list(context.world_state.robot.eef_pose),
             "grasped": bool(context.world_state.scene.grasped),
         }
+        payload.update(grasp_attempt_trace_context(context))
+        payload.update(support_regrasp_trace_context(context))
+        return payload
 
 
 class ResetGripper(OpenGripper):

@@ -7,11 +7,12 @@
 ## 每次开工前必须先读
 
 1. `./.codex/PROMPT_RULES.md`
-2. `./.codex/WORKSPACE.md`
-3. `./.codex/MEMORY.md`
-4. `./.codex/ROBOTWIN_PLAN.md`
-5. `./.codex/OPEN_SOURCE_SCRIPT_POLICY_INDEX.md`
-6. `./.codex/FM_FIRST_GRASP_STACK_PLAN.md`
+2. `./.codex/CURRENT_STATE.md`
+3. `./.codex/WORKSPACE.md`
+4. `./.codex/MEMORY.md`
+5. `./.codex/ROBOTWIN_PLAN.md`
+6. `./.codex/OPEN_SOURCE_SCRIPT_POLICY_INDEX.md`
+7. `./.codex/FM_FIRST_GRASP_STACK_PLAN.md`
 
 ## 默认工作准则
 
@@ -87,6 +88,19 @@
   - diagnostics / artifact 导出
 - 没有完成横向比较前，不要过早收敛到唯一后端
 
+10. 默认采用 human-first reporting
+- 计划、报告和阶段总结必须先给人能读懂的中文判断，再附机器字段
+- 优先回答：
+  - 当前是否通过
+  - 主要卡在哪个动作或能力
+  - 下一步应该看 trace、图片、候选、运动还是 success contract
+- 不要裸写内部字段作为主叙述，例如：
+  - `contact:right:0:contact_0`
+  - `fm_backend_compare`
+  - `fresh artifact`
+  - `support_regrasp_substage`
+- 如果必须保留这些字段，必须配一句中文解释，把它们定位成证据而不是结论本身
+
 ## 当前阶段的非协商规则
 
 1. `place_container_plate` 当前首要瓶颈按“抓取语义错误”处理，不再按“放置精度不足”处理
@@ -94,6 +108,7 @@
 3. 真实任务调试闭环必须包含图片审阅，不能只靠数字闭环
 4. 如果某轮优化没有改善图像里最核心的问题，就不应继续沿同一方向深挖
 5. 如果复杂任务已经确认卡在 grasp pose / grounding 上，不应再把主要工程时间投入到 place 末端 patch
+6. 面向用户的汇报必须先给中文结论，再给机器字段；机器字段不能替代解释
 
 ## 当前推荐的代码落点
 

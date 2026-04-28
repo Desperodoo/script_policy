@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from script_runtime.session import build_robotwin_pick_place_session, load_runtime_config, resolve_task_contract
+from script_runtime.validation.robotwin_suite_report import (
+    build_markdown_report,
+    build_run_human_summary,
+    build_suite_human_summary,
+)
 
 SUPPORTED_MODES = {"baseline", "fm_first"}
 SUCCESS_STAGE = "success"
@@ -81,6 +86,12 @@ ARTIFACT_PATH_FIELDS = (
     "components_png",
     "components_json",
 )
+
+FALLBACK_GRASP_BACKENDS = {
+    "oracle_feasibility",
+    "oracle_feasibility_first",
+    "depth_synthesized",
+}
 
 
 def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,6 +182,282 @@ def _candidate_brief(candidate: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _candidate_identity_text(candidate: Dict[str, Any] | None) -> str:
+    row = dict(candidate or {})
+    arm = str(row.get("arm") or "").strip().lower()
+    contact_point_id = row.get("contact_point_id")
+    label = str(row.get("variant_label") or row.get("label") or "").strip()
+    if arm and contact_point_id is not None and label:
+        return f"contact:{arm}:{contact_point_id}:{label}"
+    if arm and label:
+        return f"candidate:{arm}:{label}"
+    return ""
+
+
+def _row_has_candidate_context(row: Dict[str, Any]) -> bool:
+    payload = _payload(row)
+    if payload.get("grasp_attempt_candidate") or payload.get("grasp_candidates"):
+        return True
+    refresh = dict(payload.get("grasp_candidate_refresh") or {})
+    return any(refresh.get(key) for key in ("current_active_candidate", "previous_active_candidate", "current_candidates", "previous_candidates"))
+
+
+def _candidate_row_for_summary(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    summary_failure_index: int | None,
+) -> Dict[str, Any]:
+    if not rows:
+        return {}
+    if summary_failure_index is not None and 0 <= int(summary_failure_index) < len(rows):
+        for index in range(int(summary_failure_index), -1, -1):
+            row = dict(rows[index] or {})
+            if _row_has_candidate_context(row):
+                return row
+    return _execute_row_for_summary(rows, summary_failure_index=summary_failure_index)
+
+
+def _summary_candidate_context(
+    row: Dict[str, Any],
+    *,
+    fallback_candidates: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    payload = _payload(row)
+    refresh = dict(payload.get("grasp_candidate_refresh") or {})
+    current_candidates = [dict(item or {}) for item in list(refresh.get("current_candidates") or []) if isinstance(item, dict)]
+    previous_candidates = [dict(item or {}) for item in list(refresh.get("previous_candidates") or []) if isinstance(item, dict)]
+    payload_candidates = [dict(item or {}) for item in list(payload.get("grasp_candidates") or []) if isinstance(item, dict)]
+    fallback_rows = [dict(item or {}) for item in list(fallback_candidates or []) if isinstance(item, dict)]
+    skill_name = _skill_name(row)
+    if skill_name == "ExecuteGraspPhase":
+        summary_candidates = previous_candidates or current_candidates or payload_candidates or fallback_rows
+        attempt_candidate = dict(
+            payload.get("grasp_attempt_candidate")
+            or refresh.get("previous_active_candidate")
+            or refresh.get("current_active_candidate")
+            or {}
+        )
+    else:
+        summary_candidates = current_candidates or previous_candidates or payload_candidates or fallback_rows
+        attempt_candidate = dict(
+            payload.get("grasp_attempt_candidate")
+            or refresh.get("current_active_candidate")
+            or refresh.get("previous_active_candidate")
+            or {}
+        )
+    attempt_initial_candidate = dict(
+        payload.get("grasp_attempt_initial_candidate")
+        or refresh.get("grasp_attempt_initial_candidate")
+        or {}
+    )
+    attempt_candidate_identity = str(
+        payload.get("grasp_attempt_candidate_identity")
+        or refresh.get("grasp_attempt_candidate_identity")
+        or _candidate_identity_text(attempt_candidate)
+    )
+    return {
+        "summary_candidates": summary_candidates,
+        "attempt_candidate": attempt_candidate,
+        "attempt_initial_candidate": attempt_initial_candidate,
+        "attempt_candidate_identity": attempt_candidate_identity,
+        "attempt_reselected": bool(
+            payload.get("grasp_attempt_reselected", refresh.get("grasp_attempt_reselected", False))
+        ),
+        "attempt_reselection_node": str(
+            payload.get("grasp_attempt_reselection_node")
+            or refresh.get("grasp_attempt_reselection_node")
+            or ""
+        ),
+        "attempt_reselection_skill": str(
+            payload.get("grasp_attempt_reselection_skill")
+            or refresh.get("grasp_attempt_reselection_skill")
+            or ""
+        ),
+        "attempt_forced_rebuild": bool(
+            payload.get(
+                "grasp_attempt_forced_perception_rebuild",
+                refresh.get("grasp_attempt_forced_perception_rebuild", False),
+            )
+        ),
+        "attempt_forced_rebuild_reason": str(
+            payload.get("grasp_attempt_forced_perception_rebuild_reason")
+            or refresh.get("grasp_attempt_forced_perception_rebuild_reason")
+            or ""
+        ),
+    }
+
+
+def _execute_row_for_summary(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    summary_failure_index: int | None,
+) -> Dict[str, Any]:
+    if not rows:
+        return {}
+    if summary_failure_index is not None and 0 <= int(summary_failure_index) < len(rows):
+        for index in range(int(summary_failure_index), -1, -1):
+            row = dict(rows[index] or {})
+            if _skill_name(row) == "ExecuteGraspPhase":
+                return row
+    execute_rows = _skill_rows(rows, "ExecuteGraspPhase")
+    return {} if not execute_rows else dict(execute_rows[0] or {})
+
+
+def _candidates_before_execute(
+    execute_payload: Dict[str, Any],
+    *,
+    fallback_candidates: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    refresh = dict(execute_payload.get("grasp_candidate_refresh") or {})
+    previous_candidates = [dict(row or {}) for row in list(refresh.get("previous_candidates") or []) if isinstance(row, dict)]
+    if previous_candidates:
+        return previous_candidates
+    return [dict(row or {}) for row in list(fallback_candidates or []) if isinstance(row, dict)]
+
+
+def _candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[int, float, int]:
+    status = str(candidate.get("planner_status") or "Unknown")
+    status_rank = 0 if status == "Success" else 1
+    score = -float(candidate.get("score") or 0.0)
+    waypoint_count = int(candidate.get("planner_waypoint_count") or 10**9)
+    return status_rank, score, waypoint_count
+
+
+def _candidate_runtime_reason(candidate: Dict[str, Any]) -> str:
+    planner_status = str(candidate.get("planner_status") or "Unknown")
+    if planner_status == "Success":
+        return "planner_success"
+    notes = str(dict(candidate.get("affordance") or {}).get("notes") or "")
+    if "reference_contact_unavailable_in_current_instance" in notes:
+        return "reference_contact_unavailable"
+    debug = dict(candidate.get("planner_debug") or {})
+    if debug:
+        return "planner_failed"
+    if candidate.get("contact_point") in (None, [], ()):
+        return "missing_contact_point"
+    return "candidate_rejected"
+
+
+def _backend_kind_from_name(backend_name: str) -> str:
+    name = str(backend_name or "").strip()
+    if name in FALLBACK_GRASP_BACKENDS:
+        return "fallback_delegate"
+    return "fm_backend"
+
+
+def _backend_compare_state(
+    *,
+    available: bool,
+    runtime_ok: bool,
+    message: str,
+    candidate_count: int,
+    planner_feasible_candidate_count: int,
+) -> str:
+    msg = str(message or "").strip()
+    if candidate_count > 0:
+        if planner_feasible_candidate_count > 0:
+            return "backend_candidate_planner_feasible"
+        return "backend_candidate_present_but_planner_failed"
+    if available and (runtime_ok or msg == "no_runtime_candidates"):
+        return "backend_runtime_ok_but_no_candidate"
+    return "backend_not_ready"
+
+
+def _backend_selection_outcome(
+    *,
+    backend_name: str,
+    selected_backend: str,
+    compare_state: str,
+) -> str:
+    if str(backend_name or "") == str(selected_backend or "") and compare_state == "backend_candidate_planner_feasible":
+        return "selected"
+    if compare_state == "backend_candidate_planner_feasible":
+        return "ranked_below_selected_backend"
+    if compare_state == "backend_candidate_present_but_planner_failed":
+        return "planner_failed_before_selection"
+    if compare_state == "backend_runtime_ok_but_no_candidate":
+        return "no_runtime_candidates"
+    return "not_ready"
+
+
+def _summarize_backend_compare_diagnostics(
+    *,
+    grasp_payload: Dict[str, Any],
+    diagnostic_rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    payload = dict(grasp_payload or {})
+    candidates = [dict(row or {}) for row in list(payload.get("grasp_candidates") or [])]
+    selected_backend = str(payload.get("selected_backend") or "")
+    diagnostic_map: Dict[str, Dict[str, Any]] = {}
+    backend_names: List[str] = []
+    for row in list(diagnostic_rows or []):
+        backend_name = str(row.get("backend_name") or "").strip()
+        if not backend_name:
+            continue
+        diagnostic_map[backend_name] = dict(row)
+        if backend_name not in backend_names:
+            backend_names.append(backend_name)
+    for row in candidates:
+        backend_name = str(row.get("proposal_backend") or "").strip()
+        if backend_name and backend_name not in backend_names:
+            backend_names.append(backend_name)
+
+    diagnostics: List[Dict[str, Any]] = []
+    for backend_name in backend_names:
+        diag_row = dict(diagnostic_map.get(backend_name) or {})
+        diag_payload = dict(diag_row.get("diagnostics") or {})
+        available = bool(diag_payload.get("available", diag_row.get("available", False)))
+        runtime_ok = bool(diag_row.get("ok", False))
+        message = str(diag_row.get("message") or "")
+        backend_candidates = [dict(row) for row in candidates if str(row.get("proposal_backend") or "") == backend_name]
+        backend_candidates.sort(key=_candidate_sort_key)
+        planner_feasible_candidates = [
+            row for row in backend_candidates if str(row.get("planner_status") or "Unknown") == "Success"
+        ]
+        compare_state = _backend_compare_state(
+            available=available,
+            runtime_ok=runtime_ok,
+            message=message,
+            candidate_count=len(backend_candidates),
+            planner_feasible_candidate_count=len(planner_feasible_candidates),
+        )
+        selection_outcome = _backend_selection_outcome(
+            backend_name=backend_name,
+            selected_backend=selected_backend,
+            compare_state=compare_state,
+        )
+        top_candidate = dict(backend_candidates[0]) if backend_candidates else {}
+        summary_payload = dict(diag_payload.get("summary") or {})
+        diagnostics.append(
+            {
+                "backend_name": backend_name,
+                "backend_kind": _backend_kind_from_name(backend_name),
+                "available": available,
+                "runtime_ok": runtime_ok,
+                "message": message,
+                "candidate_count": len(backend_candidates),
+                "planner_feasible_candidate_count": len(planner_feasible_candidates),
+                "planner_failed_candidate_count": max(len(backend_candidates) - len(planner_feasible_candidates), 0),
+                "compare_state": compare_state,
+                "selection_outcome": selection_outcome,
+                "selected": bool(backend_name == selected_backend),
+                "top_candidate": _candidate_brief(top_candidate),
+                "top_candidate_runtime_reason": _candidate_runtime_reason(top_candidate) if top_candidate else "",
+                "summary_path": str(diag_payload.get("summary_path") or ""),
+                "output_dir": str(diag_payload.get("output_dir") or ""),
+                "headless_summary": summary_payload,
+            }
+        )
+    diagnostics.sort(
+        key=lambda row: (
+            0 if bool(row.get("selected", False)) else 1,
+            0 if str(row.get("backend_kind") or "") == "fm_backend" else 1,
+            str(row.get("backend_name") or ""),
+        )
+    )
+    return diagnostics
+
+
 def _check_grasp_brief(row: Dict[str, Any]) -> Dict[str, Any]:
     payload = _payload(row)
     report = dict(payload.get("grasp_semantic_report") or {})
@@ -210,6 +497,8 @@ def _probe_stage_from_row(task_contract: str, row: Dict[str, Any] | None) -> str
     skill_name = _skill_name(row).lower()
     contract = str(task_contract or "").strip().lower()
     if contract == "staged_place_probe":
+        if node_name.startswith("support_") or "support_regrasp" in node_name:
+            return "support_regrasp"
         if any(token in node_name for token in ("get_object_pose", "get_grasp_candidates", "prepare_gripper", "go_pregrasp", "grasp_phase", "check_grasp", "lift")):
             return "object_acquisition"
         if any(token in node_name for token in ("place_approach", "place_release")):
@@ -221,6 +510,8 @@ def _probe_stage_from_row(task_contract: str, row: Dict[str, Any] | None) -> str
             return "source_acquisition"
         if node_name.startswith("receiver_"):
             return "receiver_acquisition"
+        if "check_receiver_grasp" in node_name:
+            return "ownership_transfer"
         if "switch_active_arm_to_receiver" in node_name or "open_source_gripper" in node_name:
             return "ownership_transfer"
         if any(token in node_name for token in ("place_approach", "place_release", "open_receiver_gripper", "check_task_success")):
@@ -237,6 +528,108 @@ def _probe_stage_from_row(task_contract: str, row: Dict[str, Any] | None) -> str
     return ""
 
 
+def _support_regrasp_substage_from_row(row: Dict[str, Any] | None) -> str:
+    if row is None:
+        return ""
+    payload = _payload(row)
+    explicit = str(payload.get("support_regrasp_substage") or "").strip()
+    if explicit:
+        return explicit
+    node_name = _node_name(row).lower()
+    if not node_name.startswith("support_") and "support_regrasp" not in node_name:
+        return ""
+    if any(token in node_name for token in ("prepare_support_regrasp", "support_get_object_pose", "support_get_grasp_candidates")):
+        return "support_pregrasp_generation"
+    if any(token in node_name for token in ("support_prepare_gripper", "support_go_pregrasp", "support_reselect_grasp_after_pregrasp")):
+        return "support_pregrasp_motion"
+    if "support_check_grasp_after_lift" in node_name:
+        return "support_lift_completion"
+    if any(token in node_name for token in ("support_execute_grasp_phase", "support_check_grasp")):
+        return "support_grasp_closure"
+    if any(token in node_name for token in ("support_lift", "support_check_task_success")):
+        return "support_lift_completion"
+    return ""
+
+
+def _support_context_from_rows(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    summary_failure_row: Dict[str, Any] | None,
+    terminal_failure_row: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    def _inferred_support_completion_diagnostics(row: Dict[str, Any]) -> Dict[str, Any]:
+        payload = _payload(row)
+        skill = _skill_name(row)
+        node_name = _node_name(row).lower()
+        row_failed = str(row.get("result") or "").upper() == "FAILURE" or str(row.get("failure_code") or "") not in {"", "NONE"}
+        if not row_failed:
+            return {}
+        if _support_regrasp_substage_from_row(row) != "support_lift_completion":
+            return {}
+        if skill == "Lift" or node_name == "support_lift":
+            return {
+                "support_completion_subtype": "support_lift_motion_unreachable",
+                "support_completion_gap_reason": "support lift motion failed before support completion follow-up",
+                "support_completion_reference_frame": "support_pose",
+                "support_completion_geometry_converged": False,
+                "motion_target_pose": list(payload.get("motion_target_pose") or []),
+                "motion_diagnostics_before": dict(payload.get("motion_diagnostics_before") or {}),
+                "motion_diagnostics_after": dict(payload.get("motion_diagnostics_after") or {}),
+            }
+        if (skill == "SupportLiftPull" or node_name == "support_lift_pull") and list(payload.get("attempted_motion_plans") or []):
+            attempts = [dict(item or {}) for item in list(payload.get("attempted_motion_plans") or [])]
+            first_step = dict(((attempts[0].get("steps") or [None])[0]) or {}) if attempts else {}
+            return {
+                "support_completion_subtype": "support_follow_up_motion_unreachable",
+                "support_completion_gap_reason": "support lift succeeded but every follow-up motion plan failed on its first step",
+                "support_completion_reference_frame": "support_pose",
+                "support_completion_geometry_converged": False,
+                "support_motion_plan_names": [str(item.get("plan_name") or "") for item in attempts if str(item.get("plan_name") or "")],
+                "support_motion_all_failed_at_first_step": bool(attempts)
+                and all(not bool(item.get("ok", False)) and int(item.get("failed_step_index", -1)) == 0 for item in attempts),
+                "support_motion_requested_delta_xyz": [float(value) for value in list(payload.get("requested_delta_xyz") or [])[:3]],
+                "support_motion_start_pose": [float(value) for value in list(first_step.get("start_pose") or [])[:7]],
+                "support_motion_failed_target_pose": [float(value) for value in list(first_step.get("target_pose") or [])[:7]],
+            }
+        return {}
+
+    ordered_rows: List[Dict[str, Any]] = []
+    for row in (summary_failure_row, terminal_failure_row):
+        if row:
+            ordered_rows.append(dict(row))
+    ordered_rows.extend(dict(row) for row in reversed(list(rows or [])))
+    context: Dict[str, Any] = {}
+    for row in ordered_rows:
+        payload = _payload(row)
+        for key in ("support_arm", "support_target_frame", "support_pregrasp_pose_source"):
+            if key in context:
+                continue
+            value = str(payload.get(key) or "").strip()
+            if value:
+                context[key] = value
+        if "support_regrasp_substage" not in context:
+            substage = _support_regrasp_substage_from_row(row)
+            if substage:
+                context["support_regrasp_substage"] = substage
+        if "support_completion_diagnostics" not in context:
+            diagnostics = dict(payload.get("support_completion_diagnostics") or {})
+            if not diagnostics:
+                diagnostics = _inferred_support_completion_diagnostics(row)
+            if diagnostics:
+                context["support_completion_diagnostics"] = diagnostics
+                context["support_completion_subtype"] = str(diagnostics.get("support_completion_subtype") or "")
+                context["support_completion_gap_reason"] = str(diagnostics.get("support_completion_gap_reason") or "")
+                context["support_completion_reference_frame"] = str(
+                    diagnostics.get("support_completion_reference_frame") or ""
+                )
+                context["support_completion_geometry_converged"] = bool(
+                    diagnostics.get("support_completion_geometry_converged", False)
+                )
+        if len(context) >= 8:
+            break
+    return context
+
+
 def _contract_gap_hint(
     *,
     task_name: str,
@@ -244,6 +637,7 @@ def _contract_gap_hint(
     failure_stage: str,
     probe_stage: str,
     rows: Sequence[Dict[str, Any]],
+    summary_failure_row: Dict[str, Any] | None = None,
 ) -> str:
     task = str(task_name or "").strip().lower()
     contract = str(task_contract or "").strip().lower()
@@ -265,11 +659,48 @@ def _contract_gap_hint(
             if release_succeeded and retreat_succeeded:
                 return "support_regrasp_and_basket_lift_missing"
             return "post_place_release_or_support_regrasp_missing"
+        if task == "place_can_basket" and probe == "object_acquisition":
+            failure_row = dict(summary_failure_row or {})
+            failure_skill = _skill_name(failure_row)
+            failure_node_name = _node_name(failure_row).lower()
+            if stage == "grasp_closure" and (
+                failure_skill == "ExecuteGraspPhase" or failure_node_name == "probe_execute_grasp_phase"
+            ):
+                return "object_grasp_closure_or_candidate_family_gap"
+        if task == "place_can_basket" and probe == "staged_place_transfer":
+            if stage in {"place_motion", "success_mismatch"}:
+                return "post_place_release_or_support_regrasp_missing"
+        if task == "place_can_basket" and probe == "support_regrasp":
+            failure_row = dict(summary_failure_row or {})
+            failure_skill = _skill_name(failure_row)
+            failure_node_name = _node_name(failure_row).lower()
+            failure_substage = _support_regrasp_substage_from_row(failure_row)
+            has_support_go_pregrasp_row = any(
+                _skill_name(row) == "GoPregrasp" or _node_name(row).lower() == "support_go_pregrasp"
+                for row in skill_rows
+            )
+            if (
+                stage == "pregrasp_motion"
+                and failure_substage == "support_pregrasp_motion"
+                and (
+                    failure_skill == "GoPregrasp"
+                    or failure_node_name == "support_go_pregrasp"
+                    or has_support_go_pregrasp_row
+                )
+            ):
+                return "support_pregrasp_reachability_gap"
+            if stage == "grasp_closure":
+                return "support_regrasp_grasp_closure_gap"
+            if stage in {"success_mismatch", "place_motion", "lift_persistence"}:
+                return "basket_lift_or_support_completion_gap"
         if stage == "success_mismatch" and probe == "post_place_follow_up":
             return "post_place_follow_up_contract_gap"
 
     if contract == "handover_probe" and stage == "grasp_closure" and probe == "source_acquisition":
         return "source_grasp_closure_or_candidate_family_gap"
+    if contract == "handover_probe" and probe in {"receiver_acquisition", "ownership_transfer"}:
+        if stage in {"grasp_closure", "lift_persistence"}:
+            return "receiver_grasp_persistence_or_ownership_transfer_gap"
 
     if contract == "articulated_probe" and stage == "grasp_closure" and probe == "handle_acquisition":
         return "handle_grasp_closure_gap"
@@ -563,6 +994,31 @@ def _last_failure_row(rows: Sequence[Dict[str, Any]]) -> Tuple[Optional[int], Op
     return None, None
 
 
+def _prefer_terminal_failure_for_summary(task_contract: str) -> bool:
+    contract = str(task_contract or "").strip().lower()
+    return contract in {"handover_probe"}
+
+
+def _support_completion_summary_anchor(
+    rows: Sequence[Dict[str, Any]],
+    *,
+    terminal_failure_index: Optional[int],
+) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    if terminal_failure_index is None:
+        return None, None
+    for index in range(int(terminal_failure_index) - 1, -1, -1):
+        row = dict(rows[index] or {})
+        node_name = _node_name(row).lower()
+        if not node_name.startswith("support_"):
+            continue
+        row_failed = str(row.get("result") or "").upper() == "FAILURE" or str(row.get("failure_code") or "") not in {"", "NONE"}
+        if not row_failed:
+            continue
+        if _skill_name(row) in {"SupportLiftPull", "Lift", "CheckGrasp", "GoPregrasp", "ExecuteGraspPhase"}:
+            return index, row
+    return None, None
+
+
 def classify_failure_stage(
     rows: Sequence[Dict[str, Any]],
     *,
@@ -571,6 +1027,8 @@ def classify_failure_stage(
     env_success: bool,
     message: str = "",
     error_text: str = "",
+    failure_row_index: Optional[int] = None,
+    failure_row: Optional[Dict[str, Any]] = None,
 ) -> str:
     text_blob = " ".join(item for item in [message, error_text] if item).lower()
     if _looks_like_contract_error(text_blob):
@@ -582,7 +1040,17 @@ def classify_failure_stage(
         if timeout_stage != UNKNOWN_STAGE:
             return timeout_stage
 
-    failure_index, failure_row = _first_failure_row(rows)
+    if failure_row is None and failure_row_index is not None and 0 <= int(failure_row_index) < len(rows):
+        failure_row = dict(rows[int(failure_row_index)])
+    if failure_row_index is None and failure_row is not None:
+        for index, row in enumerate(rows):
+            if row == failure_row:
+                failure_row_index = index
+                break
+    if failure_row is None:
+        failure_index, failure_row = _first_failure_row(rows)
+    else:
+        failure_index = failure_row_index
     if failure_row is None:
         if error_text:
             return "setup_or_contract" if _looks_like_contract_error(error_text) else UNKNOWN_STAGE
@@ -621,10 +1089,18 @@ def classify_failure_stage(
     if skill in {"ExecuteGraspPhase"}:
         return "grasp_closure"
     if skill == "CheckGrasp":
-        prior_skills = {_skill_name(row) for row in rows[: failure_index or 0]}
+        prior_limit = int(failure_index or 0)
+        prior_skills = {_skill_name(row) for row in rows[:prior_limit]}
         return "lift_persistence" if "Lift" in prior_skills else "grasp_closure"
     if skill == "Lift":
         return "lift_persistence"
+    if skill == "SupportLiftPull":
+        if any(
+            token in row_text
+            for token in ("missing support lift delta", "current ee pose unavailable", "sdk adapter unavailable")
+        ):
+            return "setup_or_contract"
+        return "place_motion"
     if skill in {"PlaceApproach", "PlaceRelease", "OpenGripper", "Retreat", "GoHome"}:
         if "missing pose target" in row_text or "target_pose" in row_text:
             return "setup_or_contract"
@@ -677,24 +1153,22 @@ def extract_run_summary(
         if fm_backend_summary_path_text
         else {}
     )
+    if not list(fm_backend_summary.get("backend_compare_diagnostics") or []):
+        inspect_json_path_text = str(runtime_artifacts.get("fm_grasp_inspect_json") or "").strip()
+        if inspect_json_path_text:
+            inspect_payload = _read_run_summary(Path(inspect_json_path_text))
+            if inspect_payload:
+                grasp_result = dict(inspect_payload.get("grasp_result") or {})
+                fm_backend_summary["backend_compare_diagnostics"] = _summarize_backend_compare_diagnostics(
+                    grasp_payload=dict(grasp_result.get("payload") or {}),
+                    diagnostic_rows=list(inspect_payload.get("grasp_candidate_diagnostics") or []),
+                )
 
     robotwin = dict(config.get("robotwin") or {})
     task_goal = dict(config.get("task_goal") or {})
     runtime_status = _status_value(run_result)
     runtime_message = _message_value(run_result)
     runtime_failure_code = _failure_code_value(run_result)
-
-    grasp_rows = _skill_rows(rows, "GetGraspCandidates")
-    first_grasp_row = {} if not grasp_rows else grasp_rows[0]
-    first_grasp_payload = _payload(first_grasp_row)
-    grasp_candidates = list(first_grasp_payload.get("grasp_candidates") or [])
-    top_candidate = {} if not grasp_candidates else dict(grasp_candidates[0] or {})
-
-    execute_rows = _skill_rows(rows, "ExecuteGraspPhase")
-    first_execute_row = {} if not execute_rows else execute_rows[0]
-    first_execute_payload = _payload(first_execute_row)
-    execute_refresh = dict(first_execute_payload.get("grasp_candidate_refresh") or {})
-    executed_candidate = dict(execute_refresh.get("previous_active_candidate") or {})
 
     check_grasp_rows = _skill_rows(rows, "CheckGrasp")
     first_check = {} if not check_grasp_rows else check_grasp_rows[0]
@@ -710,6 +1184,9 @@ def extract_run_summary(
 
     failure_index, failure_row = _first_failure_row(rows)
     terminal_failure_index, terminal_failure_row = _last_failure_row(rows)
+    summary_failure_index = failure_index
+    summary_failure_row = failure_row
+    task_contract = spec.task_contract or resolve_task_contract(config)
     runtime_timeout = runtime_failure_code == "TIMEOUT" or "timeout" in runtime_message.lower()
     if runtime_timeout:
         failure_code = "TIMEOUT" if runtime_failure_code in {"", "NONE"} else runtime_failure_code
@@ -721,10 +1198,31 @@ def extract_run_summary(
         terminal_failure_node_name = _node_name(terminal_failure_row or {})
         terminal_failure_message = failure_message
     else:
-        failure_code = str((failure_row or {}).get("failure_code") or runtime_failure_code or "NONE")
-        failure_skill = _skill_name(failure_row or {})
-        failure_node_name = _node_name(failure_row or {})
-        failure_message = _row_message(failure_row or {}) or runtime_message
+        terminal_probe_stage_for_selection = _probe_stage_from_row(task_contract, terminal_failure_row)
+        if (
+            _prefer_terminal_failure_for_summary(task_contract)
+            and terminal_failure_row is not None
+            and terminal_probe_stage_for_selection in {"receiver_acquisition", "ownership_transfer"}
+        ):
+            summary_failure_index = terminal_failure_index
+            summary_failure_row = terminal_failure_row
+        if (
+            task_contract == "staged_place_probe"
+            and terminal_failure_row is not None
+            and terminal_probe_stage_for_selection == "support_regrasp"
+            and _skill_name(terminal_failure_row) == "CheckTaskSuccess"
+        ):
+            anchor_index, anchor_row = _support_completion_summary_anchor(
+                rows,
+                terminal_failure_index=terminal_failure_index,
+            )
+            if anchor_row is not None:
+                summary_failure_index = anchor_index
+                summary_failure_row = anchor_row
+        failure_code = str((summary_failure_row or {}).get("failure_code") or runtime_failure_code or "NONE")
+        failure_skill = _skill_name(summary_failure_row or {})
+        failure_node_name = _node_name(summary_failure_row or {})
+        failure_message = _row_message(summary_failure_row or {}) or runtime_message
         terminal_failure_code = str((terminal_failure_row or {}).get("failure_code") or runtime_failure_code or failure_code)
         terminal_failure_skill = _skill_name(terminal_failure_row or {})
         terminal_failure_node_name = _node_name(terminal_failure_row or {})
@@ -732,6 +1230,10 @@ def extract_run_summary(
 
     env_result = dict(task_success_payload.get("env_result") or {})
     env_success = bool(task_success_payload.get("env_success", False) or env_result.get("success", False))
+    grasp_rows = _skill_rows(rows, "GetGraspCandidates")
+    first_grasp_row = {} if not grasp_rows else grasp_rows[0]
+    first_grasp_payload = _payload(first_grasp_row)
+    grasp_candidates = list(first_grasp_payload.get("grasp_candidates") or [])
     active_arm = str(runtime_artifacts.get("active_arm") or robotwin.get("active_arm") or "")
     if not active_arm and grasp_candidates:
         active_arm = str(grasp_candidates[0].get("arm") or "")
@@ -746,10 +1248,11 @@ def extract_run_summary(
         env_success=env_success,
         message=trace_failure_text,
         error_text=error_text,
+        failure_row_index=summary_failure_index,
+        failure_row=summary_failure_row,
     )
     final_status = _final_status_for_stage(failure_stage, error_text=trace_failure_text if error_text else "")
-    task_contract = spec.task_contract or resolve_task_contract(config)
-    probe_stage = _probe_stage_from_row(task_contract, failure_row)
+    probe_stage = _probe_stage_from_row(task_contract, summary_failure_row)
     terminal_probe_stage = _probe_stage_from_row(task_contract, terminal_failure_row)
     contract_gap_hint = _contract_gap_hint(
         task_name=str(robotwin.get("task_name") or spec.entry_name),
@@ -757,6 +1260,27 @@ def extract_run_summary(
         failure_stage=failure_stage,
         probe_stage=probe_stage,
         rows=rows,
+        summary_failure_row=summary_failure_row,
+    )
+    execute_row = _execute_row_for_summary(rows, summary_failure_index=summary_failure_index)
+    execute_payload = _payload(execute_row)
+    candidate_row = _candidate_row_for_summary(rows, summary_failure_index=summary_failure_index)
+    candidate_context = _summary_candidate_context(candidate_row, fallback_candidates=grasp_candidates)
+    summary_candidates = list(candidate_context.get("summary_candidates") or [])
+    attempt_initial_candidate = dict(candidate_context.get("attempt_initial_candidate") or {})
+    attempt_candidate = dict(candidate_context.get("attempt_candidate") or {})
+    attempt_candidate_identity = str(candidate_context.get("attempt_candidate_identity") or "")
+    attempt_reselected = bool(candidate_context.get("attempt_reselected", False))
+    attempt_reselection_node = str(candidate_context.get("attempt_reselection_node") or "")
+    attempt_reselection_skill = str(candidate_context.get("attempt_reselection_skill") or "")
+    attempt_forced_rebuild = bool(candidate_context.get("attempt_forced_rebuild", False))
+    attempt_forced_rebuild_reason = str(candidate_context.get("attempt_forced_rebuild_reason") or "")
+    top_candidate = {} if not summary_candidates else dict(summary_candidates[0] or {})
+    executed_candidate = attempt_candidate
+    support_context = _support_context_from_rows(
+        rows,
+        summary_failure_row=summary_failure_row,
+        terminal_failure_row=terminal_failure_row,
     )
 
     object_model = (
@@ -784,12 +1308,28 @@ def extract_run_summary(
         "runtime_status": runtime_status,
         "final_status": final_status,
         "message": trace_failure_text,
+        "initial_failure_code": str((failure_row or {}).get("failure_code") or runtime_failure_code or "NONE"),
+        "initial_failure_skill": _skill_name(failure_row or {}),
+        "initial_failure_node_name": _node_name(failure_row or {}),
+        "initial_failure_message": _row_message(failure_row or {}) or runtime_message,
+        "initial_failure_row_index": failure_index,
         "failure_code": failure_code,
         "failure_skill": failure_skill,
         "failure_node_name": failure_node_name,
         "failure_stage": failure_stage,
         "probe_stage": probe_stage,
         "contract_gap_hint": contract_gap_hint,
+        "support_arm": str(support_context.get("support_arm") or ""),
+        "support_target_frame": str(support_context.get("support_target_frame") or ""),
+        "support_pregrasp_pose_source": str(support_context.get("support_pregrasp_pose_source") or ""),
+        "support_regrasp_substage": str(support_context.get("support_regrasp_substage") or ""),
+        "support_completion_subtype": str(support_context.get("support_completion_subtype") or ""),
+        "support_completion_gap_reason": str(support_context.get("support_completion_gap_reason") or ""),
+        "support_completion_reference_frame": str(support_context.get("support_completion_reference_frame") or ""),
+        "support_completion_geometry_converged": bool(
+            support_context.get("support_completion_geometry_converged", False)
+        ),
+        "support_completion_diagnostics": dict(support_context.get("support_completion_diagnostics") or {}),
         "terminal_failure_code": terminal_failure_code,
         "terminal_failure_skill": terminal_failure_skill,
         "terminal_failure_node_name": terminal_failure_node_name,
@@ -807,18 +1347,30 @@ def extract_run_summary(
         "selected_backend": str(first_grasp_payload.get("selected_backend") or ""),
         "selected_backend_kind": str(first_grasp_payload.get("selected_backend_kind") or ""),
         "fallback_reason": str(first_grasp_payload.get("fallback_reason") or ""),
+        "backend_compare_diagnostics": _summarize_backend_compare_diagnostics(
+            grasp_payload=first_grasp_payload,
+            diagnostic_rows=[],
+        ),
         "inspect_selected_backend": str(fm_backend_summary.get("selected_backend") or ""),
         "inspect_selected_backend_kind": str(fm_backend_summary.get("selected_backend_kind") or ""),
         "inspect_fallback_reason": str(fm_backend_summary.get("fallback_reason") or ""),
+        "inspect_backend_compare_diagnostics": list(fm_backend_summary.get("backend_compare_diagnostics") or []),
         "guided_feasible_families": list(first_grasp_payload.get("guided_feasible_families") or []),
         "template_source_debug": dict(stage_summary.get("template_source_debug") or {}),
         "candidate_count": len(grasp_candidates),
         "backend_candidate_counts": dict(sorted(backend_counts.items())),
         "top_candidate": _candidate_brief(top_candidate),
         "executed_candidate": _candidate_brief(executed_candidate),
-        "top_candidates": [_candidate_brief(row) for row in grasp_candidates[:6]],
-        "execute_grasped": bool(first_execute_payload.get("grasped", False)),
-        "execute_grasp_diagnostics": dict(first_execute_payload.get("grasp_diagnostics") or {}),
+        "top_candidates": [_candidate_brief(row) for row in summary_candidates[:6]],
+        "attempt_initial_candidate": _candidate_brief(attempt_initial_candidate),
+        "attempt_candidate_identity": attempt_candidate_identity,
+        "attempt_reselected": attempt_reselected,
+        "attempt_reselection_node": attempt_reselection_node,
+        "attempt_reselection_skill": attempt_reselection_skill,
+        "attempt_forced_perception_rebuild": attempt_forced_rebuild,
+        "attempt_forced_perception_rebuild_reason": attempt_forced_rebuild_reason,
+        "execute_grasped": bool(execute_payload.get("grasped", False)),
+        "execute_grasp_diagnostics": dict(execute_payload.get("grasp_diagnostics") or {}),
         "post_grasp_check": _check_grasp_brief(first_check) if first_check else {},
         "post_lift_check": _check_grasp_brief(post_lift_check) if post_lift_check else {},
         "last_check_grasp": _check_grasp_brief(last_check) if last_check else {},
@@ -838,8 +1390,9 @@ def extract_run_summary(
         "error_type": error_type,
         "error": error_text,
         "traceback": traceback_text,
-        "failure_row_index": failure_index,
+        "failure_row_index": summary_failure_index,
     }
+    summary["human_summary"] = build_run_human_summary(summary)
     summary["artifact_paths"] = _artifact_paths_from_mapping(summary)
     return summary
 
@@ -867,6 +1420,18 @@ def _read_run_summary(path: Path) -> Dict[str, Any]:
     except Exception:
         return {}
     return dict(data) if isinstance(data, dict) else {}
+
+
+def _load_suite_run_summaries(suite_artifact_dir: Path) -> List[Dict[str, Any]]:
+    summary_dir = suite_artifact_dir / "run_summaries"
+    if not summary_dir.exists():
+        return []
+    runs: List[Dict[str, Any]] = []
+    for path in sorted(summary_dir.glob("*.json")):
+        row = _read_run_summary(path)
+        if row:
+            runs.append(row)
+    return runs
 
 
 def _artifact_paths_from_mapping(payload: Dict[str, Any]) -> Dict[str, str]:
@@ -912,6 +1477,10 @@ def _write_fm_backend_summary(inspect_payload: Dict[str, Any], out_path: Path) -
         "target_grounders": _fm_backend_diagnostic_brief(target_rows),
         "pose_estimators": _fm_backend_diagnostic_brief(pose_rows),
         "grasp_backends": _fm_backend_diagnostic_brief(grasp_rows),
+        "backend_compare_diagnostics": _summarize_backend_compare_diagnostics(
+            grasp_payload=grasp_payload,
+            diagnostic_rows=grasp_rows,
+        ),
     }
     _write_json(out_path, payload)
     return payload
@@ -930,6 +1499,18 @@ def _merge_fm_inspect_fields_into_summary(summary: Dict[str, Any], fm_artifacts:
     summary["inspect_selected_backend"] = str(backend_summary.get("selected_backend") or "")
     summary["inspect_selected_backend_kind"] = str(backend_summary.get("selected_backend_kind") or "")
     summary["inspect_fallback_reason"] = str(backend_summary.get("fallback_reason") or "")
+    inspect_backend_compare = list(backend_summary.get("backend_compare_diagnostics") or [])
+    if not inspect_backend_compare:
+        inspect_json_path_text = str(fm_artifacts.get("fm_grasp_inspect_json") or summary.get("fm_grasp_inspect_json") or "").strip()
+        if inspect_json_path_text:
+            inspect_payload = _read_run_summary(Path(inspect_json_path_text))
+            if inspect_payload:
+                grasp_result = dict(inspect_payload.get("grasp_result") or {})
+                inspect_backend_compare = _summarize_backend_compare_diagnostics(
+                    grasp_payload=dict(grasp_result.get("payload") or {}),
+                    diagnostic_rows=list(inspect_payload.get("grasp_candidate_diagnostics") or []),
+                )
+    summary["inspect_backend_compare_diagnostics"] = inspect_backend_compare
     return summary
 
 
@@ -1219,7 +1800,11 @@ def run_suite(
             runs.append(summary)
             _write_json(_run_summary_output_path(suite_artifact_dir, task_id), summary)
 
-    aggregate = aggregate_runs(runs, skipped_entries=skipped_entries)
+    summary_runs = list(runs)
+    if not dry_run:
+        summary_runs = _load_suite_run_summaries(suite_artifact_dir) or list(runs)
+
+    aggregate = aggregate_runs(summary_runs, skipped_entries=skipped_entries)
     report = {
         "suite_name": suite_name,
         "suite_role": suite_role,
@@ -1230,12 +1815,14 @@ def run_suite(
         "default_no_video": bool(suite_config.get("default_no_video", True)),
         "run_specs": [spec.__dict__ for spec in run_specs],
         "skipped_entries": skipped_entries,
-        "runs": runs,
+        "invocation_run_count": len(runs),
+        "runs": summary_runs,
         "aggregate": aggregate,
         "require_isolated": require_isolated,
         "requested_isolated": bool(isolated),
         "isolated": effective_isolated,
     }
+    report["human_summary"] = build_suite_human_summary(report)
 
     summary_json_path = suite_artifact_dir / f"{suite_name}_summary.json"
     summary_md_path = suite_artifact_dir / f"{suite_name}_summary.md"
@@ -1253,6 +1840,8 @@ def aggregate_runs(runs: Sequence[Dict[str, Any]], *, skipped_entries: Sequence[
     selected_backend_counts = Counter()
     selected_backend_kind_counts = Counter()
     fallback_reason_counts = Counter()
+    backend_compare_state_counts: Dict[str, Counter] = defaultdict(Counter)
+    backend_selection_outcome_counts: Dict[str, Counter] = defaultdict(Counter)
     env_success_count = 0
     success_count = 0
 
@@ -1279,6 +1868,17 @@ def aggregate_runs(runs: Sequence[Dict[str, Any]], *, skipped_entries: Sequence[
         fallback_reason = str(row.get("fallback_reason") or "").strip()
         if fallback_reason:
             fallback_reason_counts[fallback_reason] += 1
+        compare_rows = list(row.get("inspect_backend_compare_diagnostics") or row.get("backend_compare_diagnostics") or [])
+        for compare_row in compare_rows:
+            backend_name = str(compare_row.get("backend_name") or "").strip()
+            if not backend_name:
+                continue
+            compare_state = str(compare_row.get("compare_state") or "").strip()
+            if compare_state:
+                backend_compare_state_counts[backend_name][compare_state] += 1
+            selection_outcome = str(compare_row.get("selection_outcome") or "").strip()
+            if selection_outcome:
+                backend_selection_outcome_counts[backend_name][selection_outcome] += 1
         if bool(row.get("env_success", False)):
             env_success_count += 1
         if str(row.get("final_status") or "") == "success":
@@ -1363,163 +1963,20 @@ def aggregate_runs(runs: Sequence[Dict[str, Any]], *, skipped_entries: Sequence[
         "selected_backend_counts": dict(sorted(selected_backend_counts.items())),
         "selected_backend_kind_counts": dict(sorted(selected_backend_kind_counts.items())),
         "fallback_reason_counts": dict(sorted(fallback_reason_counts.items())),
+        "backend_compare_state_counts": {
+            backend: dict(sorted(counter.items()))
+            for backend, counter in sorted(backend_compare_state_counts.items())
+        },
+        "backend_selection_outcome_counts": {
+            backend: dict(sorted(counter.items()))
+            for backend, counter in sorted(backend_selection_outcome_counts.items())
+        },
         "representative_runs_by_stage": representative_by_stage,
         "per_task": per_task,
         "fm_first_candidates": fm_first_candidates[:3],
         "needs_new_task_tree": needs_new_task_tree,
     }
 
-
-def build_markdown_report(report: Dict[str, Any]) -> str:
-    aggregate = dict(report.get("aggregate") or {})
-    per_task = dict(aggregate.get("per_task") or {})
-    stage_counts = dict(aggregate.get("failure_cluster_counts") or {})
-    selected_backend_counts = dict(aggregate.get("selected_backend_counts") or {})
-    selected_backend_kind_counts = dict(aggregate.get("selected_backend_kind_counts") or {})
-    fallback_reason_counts = dict(aggregate.get("fallback_reason_counts") or {})
-    fm_candidates = list(aggregate.get("fm_first_candidates") or [])
-    deferred = list(report.get("skipped_entries") or [])
-    lines = [
-        f"# RoboTwin Multitask Suite: {report.get('suite_name', '')}",
-        "",
-        f"- Suite role: `{report.get('suite_role', '')}`",
-        f"- Counts toward gate: `{str(bool(report.get('gate', False))).lower()}`",
-        f"- Suite config: `{report.get('suite_path', '')}`",
-        f"- Artifact dir: `{report.get('artifact_dir', '')}`",
-        f"- Requires isolated mode: `{str(bool(report.get('require_isolated', False))).lower()}`",
-        f"- Isolated subprocess mode: `{str(bool(report.get('isolated', False))).lower()}`",
-        f"- Run count: `{aggregate.get('run_count', 0)}`",
-        f"- Runtime success count: `{aggregate.get('success_count', 0)}`",
-        f"- Env success count: `{aggregate.get('env_success_count', 0)}`",
-        "",
-        "## Per Task",
-        "",
-        "| Task | Runs | Runtime Success | Env Success | Most Common Stage | Stage Counts |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
-    for task, summary in sorted(per_task.items()):
-        lines.append(
-            "| {task} | {run_count} | {success_count} | {env_success_count} | {common_stage} | `{stage_counts}` |".format(
-                task=task,
-                run_count=summary.get("run_count", 0),
-                success_count=summary.get("success_count", 0),
-                env_success_count=summary.get("env_success_count", 0),
-                common_stage=summary.get("most_common_failure_stage", ""),
-                stage_counts=json.dumps(summary.get("failure_stage_counts", {}), ensure_ascii=False, sort_keys=True),
-            )
-        )
-    lines.extend(
-        [
-            "",
-            "## Backend Selection",
-            "",
-            "| Selected Backend | Count |",
-            "| --- | --- |",
-        ]
-    )
-    if selected_backend_counts:
-        for backend, count in sorted(selected_backend_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
-            lines.append(f"| {backend} | {count} |")
-    else:
-        lines.append("| none | 0 |")
-
-    lines.extend(
-        [
-            "",
-            "| Backend Kind | Count |",
-            "| --- | --- |",
-        ]
-    )
-    if selected_backend_kind_counts:
-        for kind, count in sorted(selected_backend_kind_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
-            lines.append(f"| {kind} | {count} |")
-    else:
-        lines.append("| none | 0 |")
-
-    lines.extend(["", "Fallback reasons:"])
-    if fallback_reason_counts:
-        for reason, count in sorted(fallback_reason_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
-            lines.append(f"- `{reason}`: `{count}`")
-    else:
-        lines.append("- None.")
-
-    lines.extend(
-        [
-            "",
-            "## Failure Clusters",
-            "",
-            "| Stage | Count | Representative Run |",
-            "| --- | --- | --- |",
-        ]
-    )
-    representatives = dict(aggregate.get("representative_runs_by_stage") or {})
-    for stage, count in sorted(stage_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))):
-        rep = dict(representatives.get(stage) or {})
-        rep_text = "{task} seed={seed} final={status}".format(
-            task=rep.get("task", ""),
-            seed=rep.get("seed", ""),
-            status=rep.get("final_status", ""),
-        ).strip()
-        lines.append(f"| {stage} | {count} | `{rep_text}` |")
-    lines.extend(["", "## Recommended FM-First Follow-Up", ""])
-    if fm_candidates:
-        for row in fm_candidates:
-            lines.append(
-                "- `{task}`: baseline failure score `{score}`, common stage `{stage}`.".format(
-                    task=row.get("task", ""),
-                    score=row.get("score", 0),
-                    stage=row.get("most_common_failure_stage", ""),
-                )
-            )
-    else:
-        lines.append("- No strong FM-first candidate yet from the current baseline runs.")
-
-    lines.extend(["", "## Deferred Or Unsupported", ""])
-    if deferred:
-        for row in deferred:
-            lines.append(
-                "- `{name}` ({group}, {status}): {reason}".format(
-                    name=row.get("name", ""),
-                    group=row.get("group", ""),
-                    status=row.get("status", ""),
-                    reason=row.get("reason") or row.get("deferred_reason") or "",
-                )
-            )
-    else:
-        lines.append("- None.")
-
-    lines.extend(
-        [
-            "",
-            "## Per Run",
-            "",
-            "| Task | Seed | Mode | Contract | Probe Type | Probe Stage | Hint | Backend | Canary | Final Status | Env Success | Stage | Top Candidate | Executed Candidate | Run Dir |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-        ]
-    )
-    for row in list(report.get("runs") or []):
-        top = dict(row.get("top_candidate") or {})
-        executed = dict(row.get("executed_candidate") or {})
-        lines.append(
-            "| {task} | {seed} | {mode} | {contract} | {probe_type} | {probe_stage} | {hint} | {backend} | {canary} | {status} | {env_success} | {stage} | {top_label} | {exec_label} | `{run_dir}` |".format(
-                task=row.get("task", ""),
-                seed=row.get("seed", ""),
-                mode=row.get("mode", ""),
-                contract=row.get("task_contract", ""),
-                probe_type=row.get("probe_type", ""),
-                probe_stage=row.get("probe_stage", ""),
-                hint=row.get("contract_gap_hint", ""),
-                backend=row.get("selected_backend", ""),
-                canary=str(bool(row.get("canary", False))).lower(),
-                status=row.get("final_status", ""),
-                env_success=str(bool(row.get("env_success", False))).lower(),
-                stage=row.get("failure_stage", ""),
-                top_label=top.get("variant_family") or "",
-                exec_label=executed.get("variant_family") or "",
-                run_dir=row.get("run_dir", ""),
-            )
-        )
-    return "\n".join(lines) + "\n"
 
 
 def _parse_seed_override(raw_values: Optional[Sequence[str]]) -> Optional[List[int]]:

@@ -4,6 +4,8 @@ from script_runtime.adapters.fm_grasp_stack import (
     BackendResult,
     ContactGraspNetBackend,
     FoundationPoseEstimator,
+    GraspGenBackend,
+    GraspNetBaselineBackend,
     GraspProposalBackend,
     GroundedSAM2Grounder,
     GroundingResult,
@@ -1069,6 +1071,421 @@ def test_contact_graspnet_runtime_builds_template_transfer_candidates(tmp_path, 
     assert candidates[0]["template_semantic_source"] == "robotwin_task_rule"
     assert candidates[0]["affordance"]["task_compatibility"] == "preferred"
     assert candidates[0]["affordance"]["template_semantic_source"] == "robotwin_task_rule"
+
+
+def test_guided_family_label_preserves_backend_name_for_external_guided_candidates():
+    assert (
+        fm_grasp_stack_module._guided_family_label(
+            {"variant_label": "graspnet_baseline_guided_c0", "proposal_backend": "graspnet_baseline"}
+        )
+        == "graspnet_baseline_guided_c0"
+    )
+    assert (
+        fm_grasp_stack_module._guided_family_label(
+            {"template_contact_point_id": 2, "proposal_backend": "graspgen"}
+        )
+        == "graspgen_guided_c2"
+    )
+
+
+def test_graspnet_baseline_readiness_requires_checkpoint(tmp_path, monkeypatch):
+    repo = tmp_path / "graspnet-baseline"
+    repo.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        fm_grasp_stack_module,
+        "_python_import_status",
+        lambda module_names, python_bin=None: {
+            "python_bin": python_bin or "/tmp/fake-python",
+            "python_bin_exists": True,
+            "module_status": {name: True for name in module_names},
+            "module_errors": {},
+        },
+    )
+
+    readiness = GraspNetBaselineBackend(repo_path=str(repo), python_bin="/tmp/fake-python")._readiness()
+
+    assert readiness["available"] is False
+    assert readiness["message"] == "checkpoint_missing"
+
+
+def test_graspnet_baseline_readiness_accepts_checkpoint_and_external_python(tmp_path, monkeypatch):
+    repo = tmp_path / "graspnet-baseline"
+    checkpoint_path = repo / "logs" / "log_kn" / "checkpoint.tar"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_bytes(b"stub")
+
+    monkeypatch.setattr(
+        fm_grasp_stack_module,
+        "_python_import_status",
+        lambda module_names, python_bin=None: {
+            "python_bin": python_bin or "/tmp/fake-python",
+            "python_bin_exists": True,
+            "module_status": {name: True for name in module_names},
+            "module_errors": {},
+        },
+    )
+
+    readiness = GraspNetBaselineBackend(repo_path=str(repo), python_bin="/tmp/fake-python")._readiness()
+
+    assert readiness["available"] is True
+    assert readiness["message"] == "ready_for_external_run"
+    assert readiness["resolved_checkpoint_path"].endswith("checkpoint.tar")
+
+
+def test_graspnet_baseline_runtime_candidate_parser_reads_segment_npz(tmp_path, blackboard):
+    import numpy as np
+
+    output_dir = tmp_path / "graspnet_baseline_headless"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grasp_mat = np.eye(4, dtype=np.float64)
+    grasp_mat[:3, 3] = np.asarray([0.34, 0.20, 0.12], dtype=np.float64)
+    np.savez(
+        output_dir / "segment_0_grasps.npz",
+        pred_grasps_cam=np.asarray([grasp_mat], dtype=np.float64),
+        scores=np.asarray([0.72], dtype=np.float64),
+        contact_pts=np.asarray([[0.30, 0.20, 0.12]], dtype=np.float64),
+    )
+
+    class _SDK:
+        active_arm = "right"
+        pregrasp_distance = 0.10
+
+        def evaluate_pose_candidates(self, poses, kind="pregrasp"):
+            rows = []
+            for pose in poses:
+                rows.append({"kind": kind, "status": "Success", "waypoint_count": 18 if kind == "pregrasp" else 12, "pose": list(pose)})
+            return rows
+
+        def _object_model_name(self):
+            return "047_mouse"
+
+        def _object_model_id(self):
+            return 0
+
+        def _default_affordance_type_for_object(self):
+            return "body_support"
+
+    backend = GraspNetBaselineBackend(repo_path=str(tmp_path))
+    observation = PerceptionObservation(
+        task_goal={"target_object": "mouse"},
+        metadata={"camera_params": {"cam2world_cv": np.eye(4, dtype=np.float64).tolist()}},
+    )
+    context = SkillContext(blackboard=blackboard, adapters={"sdk": _SDK()})
+
+    candidates = backend._load_runtime_candidates(
+        output_dir=output_dir,
+        observation=observation,
+        context=context,
+        object_pose=[0.30, 0.20, 0.0, 1.0, 0.0, 0.0, 0.0],
+    )
+
+    assert candidates
+    assert candidates[0]["variant_label"] == "graspnet_baseline_seg0_0"
+    assert candidates[0]["proposal_backend"] == "graspnet_baseline"
+    assert candidates[0]["planner_status"] == "Success"
+
+
+def test_graspnet_baseline_runtime_can_build_template_transfer_candidates(tmp_path, blackboard):
+    import numpy as np
+
+    output_dir = tmp_path / "graspnet_baseline_headless"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grasp_mat = np.eye(4, dtype=np.float64)
+    grasp_mat[:3, 3] = np.asarray([0.34, 0.20, 0.12], dtype=np.float64)
+    np.savez(
+        output_dir / "segment_0_grasps.npz",
+        pred_grasps_cam=np.asarray([grasp_mat], dtype=np.float64),
+        scores=np.asarray([0.72], dtype=np.float64),
+        contact_pts=np.asarray([[0.30, 0.20, 0.12]], dtype=np.float64),
+    )
+
+    class _TemplateSDK:
+        active_arm = "right"
+        pregrasp_distance = 0.10
+
+        def get_grasp_candidates(self, *_args, **_kwargs):
+            return [
+                {
+                    "variant_label": "depth_contact_0",
+                    "contact_point_id": 0,
+                    "arm": "right",
+                    "pose": [0.18, 0.20, 0.12, 1.0, 0.0, 0.0, 0.0],
+                    "pregrasp_pose": [0.08, 0.20, 0.12, 1.0, 0.0, 0.0, 0.0],
+                    "planner_status": "Success",
+                    "task_compatibility": "preferred",
+                    "semantic_source": "robotwin_depth",
+                    "affordance_type": "body_support",
+                    "affordance": {
+                        "task_compatibility": "preferred",
+                        "affordance_type": "body_support",
+                    },
+                }
+            ]
+
+        def evaluate_pose_candidates(self, poses, kind="pregrasp"):
+            rows = []
+            for pose in poses:
+                x = round(float(pose[0]), 2)
+                if kind == "pregrasp":
+                    ok = abs(x - 0.08) < 1e-2
+                else:
+                    ok = abs(x - 0.18) < 1e-2
+                row = {"kind": kind, "status": "Success" if ok else "Failure", "pose": list(pose)}
+                if ok:
+                    row["waypoint_count"] = 24 if kind == "pregrasp" else 18
+                rows.append(row)
+            return rows
+
+        def _object_model_name(self):
+            return "021_cup"
+
+        def _object_model_id(self):
+            return 2
+
+        def _default_affordance_type_for_object(self):
+            return "body_support"
+
+    backend = GraspNetBaselineBackend(repo_path=str(tmp_path), template_delegate=_TemplateSDK())
+    observation = PerceptionObservation(
+        task_goal={"target_object": "cup"},
+        metadata={"camera_params": {"cam2world_cv": np.eye(4, dtype=np.float64).tolist()}},
+    )
+    context = SkillContext(blackboard=blackboard, adapters={"sdk": _TemplateSDK()})
+
+    candidates = backend._load_runtime_candidates(
+        output_dir=output_dir,
+        observation=observation,
+        context=context,
+        object_pose=[0.30, 0.20, 0.0, 1.0, 0.0, 0.0, 0.0],
+    )
+
+    assert candidates
+    assert candidates[0]["planner_status"] == "Success"
+    assert candidates[0]["variant_label"].startswith("graspnet_baseline_template_c0_0_0")
+    assert candidates[0]["proposal_backend"] == "graspnet_baseline"
+    assert candidates[0]["semantic_source"] == "graspnet_baseline_template_transfer"
+    assert candidates[0]["task_compatibility"] == "preferred"
+
+
+def test_graspgen_readiness_detects_models_repo_config(tmp_path, monkeypatch):
+    repo = tmp_path / "GraspGen"
+    repo.mkdir(parents=True, exist_ok=True)
+    models_root = tmp_path / "GraspGenModels" / "checkpoints"
+    models_root.mkdir(parents=True, exist_ok=True)
+    (models_root / "generator.pt").write_bytes(b"stub")
+    (models_root / "discriminator.pt").write_bytes(b"stub")
+    (models_root / "graspgen_robotiq_2f_140.yml").write_text(
+        "eval:\n  checkpoint: generator.pt\ndiscriminator:\n  checkpoint: discriminator.pt\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        fm_grasp_stack_module,
+        "_python_import_status",
+        lambda module_names, python_bin=None: {
+            "python_bin": python_bin or "/tmp/fake-python",
+            "python_bin_exists": True,
+            "module_status": {name: True for name in module_names},
+            "module_errors": {},
+        },
+    )
+
+    readiness = GraspGenBackend(repo_path=str(repo), python_bin="/tmp/fake-python")._readiness()
+
+    assert readiness["available"] is True
+    assert readiness["message"] == "ready_for_external_run"
+    assert readiness["resolved_gripper_config"].endswith("graspgen_robotiq_2f_140.yml")
+
+
+def test_graspgen_readiness_reports_models_repo_missing_when_models_root_is_absent(tmp_path, monkeypatch):
+    repo = tmp_path / "GraspGen"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        GraspGenBackend,
+        "_candidate_models_roots",
+        staticmethod(lambda repo_path: []),
+    )
+
+    monkeypatch.setattr(
+        fm_grasp_stack_module,
+        "_python_import_status",
+        lambda module_names, python_bin=None: {
+            "python_bin": python_bin or "/tmp/fake-python",
+            "python_bin_exists": True,
+            "module_status": {name: True for name in module_names},
+            "module_errors": {},
+        },
+    )
+
+    readiness = GraspGenBackend(repo_path=str(repo), python_bin="/tmp/fake-python")._readiness()
+
+    assert readiness["available"] is False
+    assert readiness["message"] == "models_repo_missing"
+    assert readiness["existing_models_roots"] == []
+
+
+def test_graspgen_runtime_executes_headless_runner_contract(tmp_path, monkeypatch, blackboard):
+    import numpy as np
+
+    repo = tmp_path / "GraspGen"
+    export_dir = tmp_path / "graspgen_export"
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    backend = GraspGenBackend(repo_path=str(repo), python_bin="/tmp/fake-python")
+    monkeypatch.setattr(fm_grasp_stack_module, "_backend_run_dir", lambda context, backend_name: export_dir)
+    monkeypatch.setattr(
+        backend,
+        "_readiness",
+        lambda: {
+            "available": True,
+            "message": "ready_for_external_run",
+            "resolved_repo_path": str(repo),
+            "resolved_gripper_config": str(tmp_path / "models" / "graspgen_robotiq_2f_140.yml"),
+        },
+    )
+    monkeypatch.setattr(
+        backend,
+        "_export_runtime_input",
+        lambda **kwargs: {"ok": True, "npz_path": str(tmp_path / "input.npz")},
+    )
+
+    def _fake_run(command, **kwargs):
+        out_dir = Path(command[command.index("--out-dir") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "graspgen_summary.json").write_text(
+            fm_grasp_stack_module.json.dumps({"ok": True, "grasp_total": 1}),
+            encoding="utf-8",
+        )
+        grasp_mat = np.eye(4, dtype=np.float64)
+        grasp_mat[:3, 3] = np.asarray([0.24, -0.05, 0.18], dtype=np.float64)
+        np.savez(
+            out_dir / "segment_0_grasps.npz",
+            pred_grasps_cam=np.asarray([grasp_mat], dtype=np.float64),
+            scores=np.asarray([0.83], dtype=np.float64),
+            contact_pts=np.asarray([[0.24, -0.05, 0.18]], dtype=np.float64),
+        )
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    class _SDK:
+        active_arm = "right"
+        pregrasp_distance = 0.10
+
+        def evaluate_pose_candidates(self, poses, kind="pregrasp"):
+            rows = []
+            for pose in poses:
+                rows.append({"kind": kind, "status": "Success", "waypoint_count": 20 if kind == "pregrasp" else 16, "pose": list(pose)})
+            return rows
+
+        def _object_model_name(self):
+            return "071_can"
+
+        def _object_model_id(self):
+            return 1
+
+        def _default_affordance_type_for_object(self):
+            return "body_support"
+
+    context = SkillContext(blackboard=blackboard, adapters={"sdk": _SDK()})
+    observation = PerceptionObservation(
+        task_goal={"target_object": "can"},
+        metadata={"camera_params": {"cam2world_cv": np.eye(4, dtype=np.float64).tolist()}},
+    )
+
+    result = backend.propose_grasps(
+        observation,
+        context=context,
+        object_pose=[0.24, -0.05, 0.10, 1.0, 0.0, 0.0, 0.0],
+    )
+
+    assert result.ok is True
+    assert result.payload[0]["proposal_backend"] == "graspgen"
+    assert result.payload[0]["variant_label"] == "graspgen_seg0_0"
+    assert result.diagnostics["summary"]["grasp_total"] == 1
+
+
+def test_graspgen_runtime_can_build_template_transfer_candidates(tmp_path, blackboard):
+    import numpy as np
+
+    output_dir = tmp_path / "graspgen_headless"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grasp_mat = np.eye(4, dtype=np.float64)
+    grasp_mat[:3, 3] = np.asarray([0.34, 0.20, 0.12], dtype=np.float64)
+    np.savez(
+        output_dir / "segment_0_grasps.npz",
+        pred_grasps_cam=np.asarray([grasp_mat], dtype=np.float64),
+        scores=np.asarray([0.83], dtype=np.float64),
+        contact_pts=np.asarray([[0.30, 0.20, 0.12]], dtype=np.float64),
+    )
+
+    class _TemplateSDK:
+        active_arm = "right"
+        pregrasp_distance = 0.10
+
+        def get_grasp_candidates(self, *_args, **_kwargs):
+            return [
+                {
+                    "variant_label": "depth_contact_0",
+                    "contact_point_id": 0,
+                    "arm": "right",
+                    "pose": [0.18, 0.20, 0.12, 1.0, 0.0, 0.0, 0.0],
+                    "pregrasp_pose": [0.08, 0.20, 0.12, 1.0, 0.0, 0.0, 0.0],
+                    "planner_status": "Success",
+                    "task_compatibility": "preferred",
+                    "semantic_source": "robotwin_depth",
+                    "affordance_type": "body_support",
+                    "affordance": {
+                        "task_compatibility": "preferred",
+                        "affordance_type": "body_support",
+                    },
+                }
+            ]
+
+        def evaluate_pose_candidates(self, poses, kind="pregrasp"):
+            rows = []
+            for pose in poses:
+                x = round(float(pose[0]), 2)
+                if kind == "pregrasp":
+                    ok = abs(x - 0.08) < 1e-2
+                else:
+                    ok = abs(x - 0.18) < 1e-2
+                row = {"kind": kind, "status": "Success" if ok else "Failure", "pose": list(pose)}
+                if ok:
+                    row["waypoint_count"] = 24 if kind == "pregrasp" else 18
+                rows.append(row)
+            return rows
+
+        def _object_model_name(self):
+            return "021_cup"
+
+        def _object_model_id(self):
+            return 2
+
+        def _default_affordance_type_for_object(self):
+            return "body_support"
+
+    backend = GraspGenBackend(repo_path=str(tmp_path), template_delegate=_TemplateSDK())
+    observation = PerceptionObservation(
+        task_goal={"target_object": "cup"},
+        metadata={"camera_params": {"cam2world_cv": np.eye(4, dtype=np.float64).tolist()}},
+    )
+    context = SkillContext(blackboard=blackboard, adapters={"sdk": _TemplateSDK()})
+
+    candidates = backend._load_runtime_candidates(
+        output_dir=output_dir,
+        observation=observation,
+        context=context,
+        object_pose=[0.30, 0.20, 0.0, 1.0, 0.0, 0.0, 0.0],
+    )
+
+    assert candidates
+    assert candidates[0]["planner_status"] == "Success"
+    assert candidates[0]["variant_label"].startswith("graspgen_template_c0_0_0")
+    assert candidates[0]["proposal_backend"] == "graspgen"
+    assert candidates[0]["semantic_source"] == "graspgen_template_transfer"
+    assert candidates[0]["task_compatibility"] == "preferred"
 
 
 def test_contact_graspnet_guided_candidates_inherit_template_task_semantics():

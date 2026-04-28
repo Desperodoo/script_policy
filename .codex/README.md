@@ -15,14 +15,16 @@
 
 优先阅读顺序：
 1. `PROMPT_RULES.md`
-2. `WORKSPACE.md`
-3. `MEMORY.md`
-4. `ROBOTWIN_PLAN.md`
-5. `SCRIPT_POLICY_PROGRESS_REPORT_2026-04-21.md`
-6. `FM_FIRST_GRASP_STACK_PLAN.md`
-7. `OPEN_SOURCE_SCRIPT_POLICY_INDEX.md`
-8. `TASK_PROMPT_TEMPLATE.md`
-9. `../docs/HANDOFF_FROM_RL_VLA_2026-04-15.md`
+2. `CURRENT_STATE.md`
+3. `WORKSPACE.md`
+4. `MEMORY.md`
+5. `ROBOTWIN_PLAN.md`
+6. `PROJECT_REVIEW_AND_REPAIR_PLAN_2026-04-28.md`
+7. `SCRIPT_POLICY_PROGRESS_REPORT_2026-04-21.md`
+8. `FM_FIRST_GRASP_STACK_PLAN.md`
+9. `OPEN_SOURCE_SCRIPT_POLICY_INDEX.md`
+10. `TASK_PROMPT_TEMPLATE.md`
+11. `../docs/HANDOFF_FROM_RL_VLA_2026-04-15.md`
 
 本地 skills：
 - `skills/robotwin-runtime/`
@@ -37,3 +39,5 @@
 - 每轮真实任务默认要求真实视角可视化审阅，不再只看标量 trace
 - 当前上游抓取链默认按 `FM-first grasp stack + runtime execution` 路线推进
 - grounding / pose / grasp proposal 默认同时保留多个开源候选做横向比较，不提前只押一个方案
+- 面向用户的计划和报告默认采用 human-first reporting：先写中文结论和下一步判断，再附 `contact:*`、`fm_backend_compare`、artifact path 等机器字段
+- 如果必须写内部机器字段，要配一句中文解释，避免让字段替代判断

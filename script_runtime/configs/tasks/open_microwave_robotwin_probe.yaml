@@ -28,3 +28,16 @@ task_goal:
   task_name: open_microwave
   target_object: microwave_handle
   target_surface: microwave_door
+
+grasp_semantics:
+  required: true
+  required_affordances: [handle]
+  visual_review_required: true
+  overrides:
+    - label: microwave_handle_contacts
+      task_name: open_microwave
+      contact_point_ids: [0, 1, 2, 4]
+      affordance_type: handle
+      functional_role: carry
+      semantic_priority: 1.0
+      notes: articulated_handle_contacts

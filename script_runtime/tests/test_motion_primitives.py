@@ -1,8 +1,9 @@
+from script_runtime.core.blackboard import TaskBlackboard, WorldState
 from script_runtime.core.skill_base import SkillContext
 from script_runtime.core.result_types import SkillResult
 from script_runtime.place import ClosedLoopPlaceModule
 from script_runtime.planning import CandidateVariantSpec
-from script_runtime.skills.motion.primitives import PlaceApproach, PlaceRelease
+from script_runtime.skills.motion.primitives import GoPregrasp, Lift, PlaceApproach, PlaceRelease
 
 
 class _PlannerAwareSDK:
@@ -24,7 +25,10 @@ class _PlannerAwareSDK:
 
     def move_l(self, pose, speed=1.0):
         self.move_calls.append({"pose": list(pose), "speed": speed})
-        return {"ok": abs(float(pose[0]) - 0.4) < 1e-6, "command": {"type": "move_l", "pose": list(pose), "speed": speed}}
+        ok = abs(float(pose[0]) - 0.4) < 1e-6
+        if ok:
+            self.status["eef_pose"] = list(pose)
+        return {"ok": ok, "command": {"type": "move_l", "pose": list(pose), "speed": speed}}
 
     def refresh_world(self, blackboard):
         return self.status
@@ -37,6 +41,9 @@ class _PlannerAwareSDK:
             "score_adjust": 1.5 if abs(float(pose[0]) - 0.4) < 1e-6 else -0.2,
             "predicted_object_to_target_center_delta": {"xy_norm": 0.02 if abs(float(pose[0]) - 0.4) < 1e-6 else 0.2},
         }
+
+    def get_status(self):
+        return dict(self.status)
 
 
 def test_place_approach_prefers_planner_ranked_candidate(monkeypatch, blackboard):
@@ -70,6 +77,99 @@ def test_place_approach_prefers_planner_ranked_candidate(monkeypatch, blackboard
     assert result.payload["planner_status"] == "Success"
     assert result.payload["candidate_ranking"][0]["label"] == "left_arm_clear"
     assert result.payload["candidate_ranking"][0]["score_metrics"]["predicted_object_to_target_center_delta"]["xy_norm"] == 0.02
+
+
+def test_go_pregrasp_records_motion_pose_diagnostics_on_failure():
+    sdk = _PlannerAwareSDK()
+    sdk.status["eef_pose"] = [0.1, -0.2, 0.3, 1.0, 0.0, 0.0, 0.0]
+    blackboard = TaskBlackboard(WorldState())
+    blackboard.update_world(robot={"eef_pose": list(sdk.status["eef_pose"])})
+    blackboard.set("pregrasp_pose", [0.3, 0.2, 0.35, 1.0, 0.0, 0.0, 0.0])
+
+    result = GoPregrasp().run(
+        SkillContext(
+            blackboard=blackboard,
+            adapters={"sdk": sdk},
+            task_id="go-pregrasp-failure",
+            metadata={"current_node_name": "support_go_pregrasp"},
+        )
+    )
+
+    assert result.status.value == "FAILURE"
+    assert result.payload["motion_target_pose"][:3] == [0.3, 0.2, 0.35]
+    before = result.payload["motion_diagnostics_before"]
+    assert before["current_xyz"] == [0.1, -0.2, 0.3]
+    assert before["target_xyz"] == [0.3, 0.2, 0.35]
+    assert before["xyz_delta"] == {"dx": 0.19999999999999998, "dy": 0.4, "dz": 0.04999999999999999}
+    assert before["xy_norm"] > 0.0
+    assert before["orientation_error_rad"] == 0.0
+
+
+def test_go_pregrasp_records_motion_pose_diagnostics_on_success():
+    sdk = _PlannerAwareSDK()
+    sdk.status["eef_pose"] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    blackboard = TaskBlackboard(WorldState())
+    blackboard.update_world(robot={"eef_pose": list(sdk.status["eef_pose"])})
+    blackboard.set("pregrasp_pose", [0.4, 0.2, 0.35, 1.0, 0.0, 0.0, 0.0])
+
+    result = GoPregrasp(target_pose=[0.4, 0.2, 0.35, 1.0, 0.0, 0.0, 0.0]).run(
+        SkillContext(
+            blackboard=blackboard,
+            adapters={"sdk": sdk},
+            task_id="go-pregrasp-success",
+            metadata={"current_node_name": "support_go_pregrasp"},
+        )
+    )
+
+    assert result.status.value == "SUCCESS"
+    assert result.payload["motion_target_pose"][:3] == [0.4, 0.2, 0.35]
+    assert result.payload["motion_diagnostics_before"]["current_xyz"] == [0.0, 0.0, 0.0]
+    assert result.payload["motion_diagnostics_after"]["current_xyz"] == [0.4, 0.2, 0.35]
+
+
+def test_support_lift_uses_segmented_fallback_when_full_lift_fails():
+    class _SupportLiftSDK:
+        def __init__(self):
+            self.move_calls = []
+            self.status = {"eef_pose": [0.2, -0.1, 0.9, 1.0, 0.0, 0.0, 0.0]}
+
+        def move_l(self, pose, speed=1.0):
+            command = {"type": "move_l", "pose": list(pose), "speed": speed}
+            self.move_calls.append(command)
+            delta_z = abs(float(pose[2]) - float(self.status["eef_pose"][2]))
+            if delta_z > 0.06:
+                return {"ok": False, "action": "move_l", "command": command}
+            self.status["eef_pose"] = list(pose)
+            return {"ok": True, "action": "move_l", "command": command}
+
+        def refresh_world(self, _blackboard):
+            return {"ok": True}
+
+        def get_status(self):
+            return dict(self.status)
+
+    sdk = _SupportLiftSDK()
+    blackboard = TaskBlackboard(WorldState())
+    blackboard.set("probe_support_regrasp_active", True)
+    blackboard.set("lift_pose", [0.2, -0.1, 1.0, 1.0, 0.0, 0.0, 0.0])
+
+    result = Lift().run(
+        SkillContext(
+            blackboard=blackboard,
+            adapters={"sdk": sdk},
+            task_id="support-lift-fallback",
+            metadata={"current_node_name": "support_lift"},
+        )
+    )
+
+    assert result.status.value == "SUCCESS"
+    assert result.payload["motion_plan"] == "lift_60_40"
+    assert len(result.payload["motion_plan_attempts"]) >= 2
+    assert result.payload["motion_plan_attempts"][0]["plan_name"] == "full_lift"
+    assert result.payload["motion_plan_attempts"][0]["ok"] is False
+    assert sdk.move_calls[0]["pose"][2] == 1.0
+    assert [round(call["pose"][2], 4) for call in sdk.move_calls[1:3]] == [0.96, 1.0]
+    assert round(float(result.payload["motion_diagnostics_after"]["current_xyz"][2]), 4) == 1.0
 
 
 def test_place_release_records_planner_ranked_attempts(monkeypatch, blackboard):

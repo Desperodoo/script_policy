@@ -1,10 +1,711 @@
 # RoboTwin Plan
 
+> 当前结论入口：先读 `.codex/CURRENT_STATE.md`。本文件保留 RoboTwin 长期计划和历史推进记录，具体今日状态以 current state 为准。
+
 ## 目标
 
 将 `script_runtime` 的执行层主干迁移到 RoboTwin 仿真环境中，形成新的主验证链。
 
 ## 2026-04-21 下一阶段推进状态
+
+- 2026-04-23 傍晚最新阶段状态补充：
+  - 这一轮继续严格收口在 `place_can_basket` 的 support-side frontier，没有扩 compare / wave2 / 新 contract：
+    - `GetGraspCandidates` 在 support regrasp context 下现在会显式 obey designated `support_arm`
+    - 调 perception provider 前先把 `sdk.active_arm` 与 blackboard `active_arm` 对齐到 `support_arm`
+    - provider 返回候选后再按 designated `support_arm` 过滤
+    - 如果没有该 arm 的候选，则显式失败并透出：
+      - `support_arm`
+      - `available_candidate_arms`
+  - 对应 fresh 单测已通过：
+    - `test_grasp_semantics.py` + `test_robotwin_multitask_suite.py` + `test_probe_tasks.py`
+      - `52 passed`
+  - 当前 fresh `place_can_basket_probe seed=1 isolated` 连跑两次后，最新真实落点现已进一步压缩为：
+    - `support_regrasp / success_mismatch / CheckTaskSuccess`
+    - `contract_gap_hint = basket_lift_or_support_completion_gap`
+    - `support_regrasp_substage = support_lift_completion`
+    - `support_completion_subtype = support_target_alignment_gap`
+    - `attempt_candidate_identity = contact:right:0:contact_0`
+  - latest trace 说明：
+    - `support_get_grasp_candidates`、`support_execute_grasp_phase`、`support_lift_pull` 当前都能成功通过
+    - support-arm 串台已不再是主漂移源
+    - 当前第一失败前沿已经前移到：
+      - `support_check_task_success`
+  - fresh `complex_probe` 三任务视图当前保持：
+    - `handover_block`
+      - `source_acquisition / grasp_closure / source_grasp_closure_or_candidate_family_gap`
+    - `open_microwave`
+      - `handle_acquisition / grasp_closure / handle_grasp_closure_gap`
+    - `place_can_basket`
+      - `support_regrasp / success_mismatch / CheckTaskSuccess`
+      - `support_completion_subtype = support_target_alignment_gap`
+  - fresh `place-only` gate 也已重新确认仍守住：
+    - `18 runs / 17 env success`
+    - 唯一失败仍只有：
+      - `place_container_plate seed=2`
+    - 但 latest fresh 失败口径现应更新为：
+      - `grasp_closure / ExecuteGraspPhase / execute_grasp_phase`
+  - 因而当前项目级下一步默认优先级应更新为：
+    1. 把 `place_can_basket` 的 support completion / success contract 差异做成可解释问题
+    2. 重点解释 `support_target_alignment_gap` 背后的 success input，而不是继续追 support-arm 或 candidate binding
+    3. `handover_block`、`open_microwave`、`place-only`、`fm_backend_compare` 继续只做保护性回归
+
+- 2026-04-23 下午最新阶段状态补充：
+  - 这轮的主改动继续严格收在 `place_can_basket` 的 support-side runtime frontier，没有再扩 compare / wave2 / 新 contract：
+    - `SupportLiftPull` 失败现在会直接带出 support completion 子类
+    - 当前新的 completion subtype 是：
+      - `support_follow_up_motion_unreachable`
+    - 语义上表示：
+      - `support_lift` 已成功完成
+      - 但后续所有 `SupportLiftPull` fallback motion plan 都在第一步失败
+      - trace / summary 中现在已经能直接读到对应证据
+  - 同时也把 `support_lift` 自身纳入同一个 support completion family：
+    - 当 `support_lift` 在 `support_lift_completion` 子阶段失败时
+    - summary 不再留空
+    - 会统一补成：
+      - `support_lift_motion_unreachable`
+  - 当前 fresh 单测状态：
+    - `test_grasp_semantics.py` + `test_robotwin_multitask_suite.py`
+      - `46 passed`
+    - `test_robotwin_bridge.py` + `test_session.py`
+      - `38 passed`
+    - `test_probe_tasks.py`
+      - `4 passed`
+  - 当前两次 isolated `place_can_basket_probe seed=1` 的真实结果表明：
+    - 第一次落在：
+      - `support_regrasp / place_motion / SupportLiftPull`
+      - `contract_gap_hint = basket_lift_or_support_completion_gap`
+      - `support_completion_subtype = support_follow_up_motion_unreachable`
+    - 第二次落在：
+      - `support_regrasp / lift_persistence / Lift`
+      - `contract_gap_hint = basket_lift_or_support_completion_gap`
+      - `support_completion_subtype = support_lift_motion_unreachable`
+  - 因而当前对 `place_can_basket` 的阶段结论应更新为：
+    1. 它已经没有再漂回 object-side
+    2. 它也不再退回空 hint
+    3. 当前第一前沿已经被压进：
+       - `support_regrasp / support_lift_completion`
+    4. 但 support completion family 内部仍未压成单一子前沿：
+       - `support_lift_motion_unreachable`
+       - `support_follow_up_motion_unreachable`
+  - 当前 fresh `complex_probe` full-suite 也已重新确认：
+    - `handover_block`
+      - `source_acquisition / grasp_closure / source_grasp_closure_or_candidate_family_gap`
+    - `open_microwave`
+      - `handle_acquisition / grasp_closure / handle_grasp_closure_gap`
+    - `place_can_basket`
+      - `support_regrasp / place_motion / SupportLiftPull`
+      - `support_regrasp_substage = support_lift_completion`
+      - `support_completion_subtype = support_follow_up_motion_unreachable`
+  - 当前外层项目基线这轮没有主动重跑，但真相仍保持：
+    - gate:
+      - 最新已验证 artifact 仍是 `18 / 17`
+      - 唯一失败应记为：
+        - `place_container_plate seed=2`
+        - `grasp_closure / ExecuteGraspPhase / execute_grasp_phase`
+    - compare:
+      - `45 / 45`
+      - 三后端各 `15`
+      - 本轮未触碰 selection semantics，也未 rerun
+
+- 2026-04-23 当前最新阶段状态补充：
+  - fresh `place-only` gate 已重新确认仍守住：
+    - `18 runs / 17 env success`
+    - 唯一失败仍然是：
+      - `place_container_plate seed=2`
+      - `lift_persistence / CheckGrasp / check_grasp_after_lift`
+  - 这说明本轮为 `place_can_basket` 做的 attempt / summary / motion instrumentation 目前没有把正式 gate 带坏
+  - support-side debug 这轮又向前推了一步：
+    - `MoveL / GoPregrasp` 现已补上 motion 几何诊断
+      - `motion_target_pose`
+      - `motion_diagnostics_before`
+      - `motion_diagnostics_after`
+    - 可直接从 trace 读取：
+      - 当前 ee pose
+      - 目标 pose
+      - xyz 误差
+      - orientation 误差
+  - 还修掉了一个新暴露出来的 summary 口径问题：
+    - 当 `support_check_task_success` 失败时
+    - 只有前一条 support-side 行本身也失败，才允许回锚
+    - 如果前一条 `SupportLiftPull` 已成功，则保留 terminal `CheckTaskSuccess`
+  - latest fresh instrumented isolated `place_can_basket_probe seed=1` 的真实口径现已更新为：
+    - `support_regrasp / success_mismatch / CheckTaskSuccess / basket_lift_or_support_completion_gap`
+    - `top_candidate = executed_candidate = contact_0`
+    - `attempt_candidate_identity = contact:right:0:contact_0`
+    - `support_regrasp_substage = support_lift_completion`
+  - 同一条真实 trace 还说明：
+    - `support_go_pregrasp` 在这次 run 中成功
+    - `motion_diagnostics_before.xy_norm ≈ 0.305`
+    - `motion_diagnostics_after.xy_norm ≈ 0.00184`
+    - `orientation_error_rad` 也从约 `1.591` 收到约 `0.00424`
+    - 随后 support-side grasp / lift / support_lift_pull 都成功
+    - 真正的最终 failure 落在 `support_check_task_success`
+  - 因而当前对 `place_can_basket` 的阶段判断应再更新为：
+    1. support-side 第一失败前沿不是单一固定点
+    2. 它至少会在以下三类之间真实漂移：
+       - `support_go_pregrasp`
+       - `support_lift_pull`
+       - `support_check_task_success`
+    3. 但现在我们已经能够区分：
+       - 哪些 run 是 pregrasp reachability 问题
+       - 哪些 run 是 support completion / task success contract 问题
+    4. 下一轮默认优先级应改成：
+       - 对比 `support_go_pregrasp` fail 与 `support_check_task_success` fail 的 support-side几何与 success contract 差异
+       - 不是再去补 summary，而是解释“动作成功但 env success 没过”的 support completion gap
+
+- 2026-04-23 当前最新阶段状态补充：
+  - 这一轮主线已经从“补 summary / 补记忆”继续推进到“收敛 `place_can_basket` 的 attempt 语义与 support-side failure frontier”：
+    - 已把 attempt 级 candidate 透传接通到：
+      - `GetGraspCandidates`
+      - `ReselectGraspAfterPregrasp`
+      - `ExecuteGraspPhase`
+      - `RetryWithNextCandidate`
+      - `extract_run_summary`
+    - `place_can_basket` summary 当前已稳定暴露：
+      - `attempt_initial_candidate`
+      - `attempt_candidate_identity`
+      - `attempt_reselected`
+      - `attempt_reselection_node`
+      - `attempt_reselection_skill`
+      - `attempt_forced_perception_rebuild`
+      - `attempt_forced_perception_rebuild_reason`
+  - 这轮又把两个 summary 选择问题收紧了：
+    - `staged_place_probe`
+      - terminal `support_check_task_success` 会回锚到最近 support-side 可解释前沿
+    - `handover_probe`
+      - terminal override 不再允许 `handover_completion` 的 place-motion 覆盖
+      - `handover_block` 已重新守回：
+        - `source_acquisition / grasp_closure / source_grasp_closure_or_candidate_family_gap`
+  - 还修了一个 `place_can_basket` pregrasp summary 串台问题：
+    - support-side `GoPregrasp` 失败时
+    - summary 不再误拿 object-side 旧 `ExecuteGraspPhase` 的 candidate 集合
+    - 现在会优先取最近的当前 attempt refresh / current active candidate
+  - 当前 fresh 单测状态：
+    - `test_robotwin_multitask_suite.py`
+      - `31 passed`
+    - `test_recovery_primitives.py`
+    - `test_grasp_semantics.py`
+    - `test_robotwin_bridge.py`
+    - `test_probe_tasks.py`
+      - 合计 `44 passed`
+  - 当前 fresh real-run 状态：
+    - `place_can_basket_probe` isolated `seed=1` 连跑两次：
+      - 两次都稳定在
+        - `support_regrasp / place_motion / SupportLiftPull / basket_lift_or_support_completion_gap`
+      - 且都保持：
+        - `top_candidate = executed_candidate = contact_1`
+        - `attempt_candidate_identity = contact:right:1:contact_1`
+        - `attempt_reselected = false`
+    - latest fresh `complex_probe` full suite：
+      - `handover_block`
+        - `source_acquisition / grasp_closure / source_grasp_closure_or_candidate_family_gap`
+      - `open_microwave`
+        - `handle_acquisition / grasp_closure / handle_grasp_closure_gap`
+      - `place_can_basket`
+        - `support_regrasp / pregrasp_motion / GoPregrasp / support_pregrasp_reachability_gap`
+        - summary candidate 现已对齐为：
+          - `top_candidate = contact_0`
+          - `executed_candidate = contact_0`
+          - `attempt_candidate_identity = contact:right:0:contact_0`
+  - 因而当前项目级判断应更新为：
+    1. `handover_block` 与 `open_microwave` 继续作为保护性稳定基线
+    2. `place_can_basket` 的 summary / taxonomy / attempt 绑定这层已基本收口
+    3. 剩余主问题不再是“summary 空白”或“candidate 语义串台”，而是
+       support-side runtime frontier 本身仍在
+       - `SupportLiftPull`
+       - `GoPregrasp`
+       之间真实漂移
+    4. 下一轮若继续深挖 `place_can_basket`，优先级应放在：
+       - support-side pregrasp reachability 与 support completion 的真实运行差异
+       - 而不是再去补 compare / wave2 / 新 contract
+  - 当前仍未 fresh 重跑：
+    - `place-only` gate
+    - `fm_backend_compare`
+  - 所以项目的已确认外层基线仍保持：
+    - gate:
+      - `18 runs / 17 env success`
+      - 唯一已确认失败：
+        - `place_container_plate seed=2`
+        - `lift_persistence / CheckGrasp / check_grasp_after_lift`
+    - compare:
+      - `45 / 45`
+      - 三后端各 `15`
+
+- 当前最新阶段状态补充：
+  - `place_can_basket` 的 summary 口径这轮又向前收了一步：
+    - `extract_run_summary` 现在会优先用 summary failure 对应 execute attempt 的
+      - `grasp_candidate_refresh.previous_candidates`
+      来对齐 `top_candidate`
+    - 不再默认拿整条 run 第一条 `GetGraspCandidates` 的 top candidate 去和后续 execute candidate 比
+  - 还补上了 `place_can_basket` object-side 的非空 taxonomy：
+    - `object_acquisition / grasp_closure / ExecuteGraspPhase`
+      - `contract_gap_hint = object_grasp_closure_or_candidate_family_gap`
+  - 对应单测已跑通：
+    - `conda run -n script_policy pytest script_runtime/tests/test_robotwin_multitask_suite.py`
+    - `27 passed`
+  - latest filtered complex probe 刷新结果：
+    - `robotwin_multitask_complex_probe_summary.json`
+    - 当前重新刷成：
+      - `run_count = 3`
+      - `env_success_count = 0`
+    - 三条任务口径为：
+      - `handover_block`
+        - `source_acquisition / grasp_closure / source_grasp_closure_or_candidate_family_gap`
+      - `open_microwave`
+        - `handle_acquisition / grasp_closure / handle_grasp_closure_gap`
+      - `place_can_basket`
+        - `support_regrasp / pregrasp_motion / GoPregrasp / support_pregrasp_reachability_gap`
+  - 因而当前 complex probe 线对 `place_can_basket` 的正式判断应更新为：
+    1. summary 已经不再允许空 hint
+    2. object-side 与 support-side frontier 之间仍有真实运行漂移
+    3. 下一步应继续围绕 candidate-family / execute attempt 稳定性推进，而不是回退成只修文档或只补 summary
+
+- 当前最新阶段状态补充：
+  - `fm_backend_compare` 的 summary 已进一步收口成“artifact dir 下全部 per-run summaries 的项目级回收视图”：
+    - 这意味着 filtered rerun 不会再把总表覆盖成子视图
+  - 又 fresh 复跑了 `place_empty_cup` 的三后端 canary：
+    - `contact_graspnet`
+    - `graspnet_baseline`
+    - `graspgen`
+  - 当前最新完整 compare summary 现已稳定为：
+    - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare/robotwin_multitask_place_fm_backend_compare_summary.md`
+    - 聚合结果：
+      - `run_count = 45`
+      - `env_success_count = 45`
+      - `selected_backend_counts = {"contact_graspnet": 15, "graspgen": 15, "graspnet_baseline": 15}`
+      - `selected_backend_kind_counts = {"fm_backend": 45}`
+  - 这说明 compare 线当前已经完成了真正的三后端 healthy5 × `seed=1/2/3` 同面矩阵收口
+  - 因而 compare 线的默认下一步不再是“继续修 summary / 补 matrix”，而是：
+    1. 保持 gate 不回退
+    2. 只在 selection 语义真正变化时，才追加新的 compare rerun
+    3. 否则把资源转回 complex probe / 单任务 blocker
+
+- 当前最新阶段状态补充：
+  - `place-only` gate 又 fresh 复跑了一轮，结果仍然保持：
+    - `18 runs / 17 env success`
+  - 但唯一失败的最新真实形态已经变化为：
+    - `place_container_plate seed=2`
+    - `failure_stage = lift_persistence`
+    - `failure_skill = CheckGrasp`
+    - `failure_node_name = check_grasp_after_lift`
+  - 因而 gate 线当前的正式口径应更新为：
+    - 红线仍然守住了 `17/18`
+    - 但剩余失败不再只是 “grasp_closure”
+    - 当前更像 “lift 后 grasp persistence / after-lift verification” 问题
+
+- 当前最新阶段状态补充：
+  - 这轮原本为 `place_can_basket` 补了 support-side 深化：
+    - `support_arm`
+    - `support_target_frame`
+    - `support_pregrasp_pose_source`
+    - `support_regrasp_substage`
+    - 以及 `support_pregrasp_reachability_gap`
+  - 但 fresh targeted/full `complex_probe` 结果表明：
+    - 当前 `place_can_basket` 已经不再稳定进入 `support_regrasp`
+    - 最新完整三任务视图是：
+      - `handover_block`
+        - `source_acquisition / grasp_closure / source_grasp_closure_or_candidate_family_gap`
+      - `open_microwave`
+        - `handle_acquisition / grasp_closure / handle_grasp_closure_gap`
+      - `place_can_basket`
+        - `object_acquisition / grasp_closure / ExecuteGraspPhase / contract_gap_hint=""`
+  - 这意味着 complex probe 线的当前主判断也要更新：
+    - `handover_block` 和 `open_microwave` 继续稳定
+    - `place_can_basket` 当前第一前沿已经前移到主抓取执行阶段
+    - support-side instrumentation 虽然已接通，但暂时还不是第一故障面
+  - 这轮还修了一个会误导 probe 的选择 bug：
+    - `RoboTwinBridge._resolve_active_grasp_candidate`
+    - 当当前 active candidate 已经 planner-failed、refresh 后又出现新的 planner-feasible candidate 时，不再盲目坚持旧候选
+  - 但即使在这个修正后，`place_can_basket` 仍然稳定失败在 `ExecuteGraspPhase`
+  - 因而 complex probe 线接下来的默认顺序应更新为：
+    1. 先围绕 `place_can_basket` 的 object-acquisition grasp execution / candidate-family 稳定性推进
+    2. 不要默认从 support lift / support completion 开始优化
+    3. 继续把 `handover_block` / `open_microwave` 当作保护性回归基线
+- 当前最新阶段状态补充：
+  - `fm_backend_compare` 的 healthy5 `seed=2/3` execution compare 已全部收口完成：
+    - `graspnet_baseline`
+      - 在 healthy5 的 `seed=1/2/3` 上全部保持 execution-level selected
+    - `graspgen`
+      - 在 healthy5 的 `seed=1/2/3` 上全部保持 execution-level selected
+  - 当前最新完整 suite summary 已重建为：
+    - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare/robotwin_multitask_place_fm_backend_compare_summary.md`
+    - 聚合结果：
+      - `run_count = 31`
+      - `env_success_count = 31`
+      - `selected_backend_counts = {"contact_graspnet": 1, "graspgen": 15, "graspnet_baseline": 15}`
+      - `selected_backend_kind_counts = {"fm_backend": 31}`
+  - 这意味着 compare 线的阶段结论应进一步更新为：
+    - healthy5 上
+      - `graspnet_baseline`
+      - `graspgen`
+      不只是 `seed=1` 稳定
+    - 在当前已跑的 `seed=1/2/3` execution compare 面上，它们都已经稳定守住：
+      - planner-feasible
+      - selected backend
+      - env success
+    - 当前 compare 主问题已经不再是“会不会重新退回 `depth_synthesized`”
+  - 因而当前下一步默认顺序应更新为：
+    1. 保持 `place-only` gate 不回退
+    2. 继续推进 complex probe 当前三条稳定缺口：
+       - `place_can_basket`
+       - `handover_block`
+       - `open_microwave`
+    3. compare 线后续若继续扩展，优先考虑：
+       - 是否把 `contact_graspnet` 系统性扩到 healthy5 的同一多 seed 比较面
+       - 或把已经稳定的 compare 面轻量带到更复杂任务做探针验证
+
+- 当前最新阶段状态补充：
+  - `complex_probe` 这轮已经重新回到完整三任务视图：
+    - `place_can_basket`
+      - `probe_stage = support_regrasp`
+      - `contract_gap_hint = basket_lift_or_support_completion_gap`
+    - `handover_block`
+      - 在最新 summary 逻辑下，已不再被 cleanup `SafeRetreat` 覆盖
+      - 当前落点为：
+        - `probe_stage = source_acquisition`
+        - `failure_stage = grasp_closure`
+        - `contract_gap_hint = source_grasp_closure_or_candidate_family_gap`
+    - `open_microwave`
+      - 继续稳定为：
+        - `probe_stage = handle_acquisition`
+        - `failure_stage = grasp_closure`
+        - `contract_gap_hint = handle_grasp_closure_gap`
+  - `fm_backend_compare` 也已开始从 healthy5 `seed=1` 扩到 `seed=2/3`：
+    - 截至当前已完成并确认的 subset：
+      - `place_empty_cup seed=2/3`
+      - `place_mouse_pad seed=2/3`
+    - 在这个 subset 上：
+      - `graspnet_baseline`
+        - 继续保持 execution-level selected
+      - `graspgen`
+        - 继续保持 execution-level selected
+      - `depth_synthesized`
+        - 没有重新夺回 selected backend
+  - 因此当前下一步默认顺序应更新为：
+    1. 继续让 healthy5 其余任务的 `seed=2/3` compare 跑完：
+       - `place_phone_stand`
+       - `place_shoe`
+       - `place_object_stand`
+    2. 在 compare 完成后重建完整 `robotwin_multitask_place_fm_backend_compare` suite summary
+    3. 继续围绕 complex probe 当前三条稳定缺口推进
+
+- 当前最新阶段状态补充：
+  - `GraspNetBaseline / GraspGen` 的 execution compare 已正式从 `place_empty_cup seed=1` 扩到 healthy5 其余任务 `seed=1`：
+    - `place_mouse_pad`
+    - `place_phone_stand`
+    - `place_shoe`
+    - `place_object_stand`
+  - 当前最新真实结果是：
+    - `graspnet_baseline`
+      - 在 healthy5 的 5 个任务 `seed=1` 上全部保持：
+        - `selected_backend = graspnet_baseline`
+        - `selected_backend_kind = fm_backend`
+        - `final_status = success`
+    - `graspgen`
+      - 在 healthy5 的 5 个任务 `seed=1` 上全部保持：
+        - `selected_backend = graspgen`
+        - `selected_backend_kind = fm_backend`
+        - `final_status = success`
+  - 当前最新完整 suite summary 已重建为：
+    - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare/robotwin_multitask_place_fm_backend_compare_summary.md`
+    - 聚合结果：
+      - `run_count = 11`
+      - `env_success_count = 11`
+      - `selected_backend_counts = {"contact_graspnet": 1, "graspgen": 5, "graspnet_baseline": 5}`
+      - `backend_kind_counts = {"fm_backend": 11}`
+  - 这意味着 compare 线的阶段结论应更新为：
+    - healthy5 `seed=1` 上
+      - `contact_graspnet`
+      - `graspnet_baseline`
+      - `graspgen`
+      三条 backend 已全部进入真实 execution-level selected 面
+    - 当前不再存在“healthy5 其余任务会退回 `depth_synthesized`”这一未决主问题
+  - 因而 compare 线的下一轮默认顺序也应更新为：
+    1. 保持 `place-only` gate 不回退
+    2. complex probe 继续收敛：
+       - `place_can_basket`
+       - `handover_block`
+       - `open_microwave`
+    3. FM compare 从 healthy5 `seed=1` 继续扩到 `seed=2/3`
+    4. 只有在多 seed 稳定性也成立后，再决定是否进一步打开新的 compare 面
+
+- 当前最新阶段状态补充：
+  - external grasp compare 线已在 `place_empty_cup seed=1` 的定向 inspect 面上前推成功：
+    - `GraspNetBaselineBackend / GraspGenBackend` 当前已不再只依赖 raw matrix pose
+    - 已接入：
+      - `template_delegate = robotwin_depth_provider`
+      - template-transfer candidate
+      - guided contact-family candidate
+  - 当前定向 inspect artifact：
+    - `graspnet_baseline`
+      - `/tmp/script_policy_compare_configs/place_empty_cup_graspnet_baseline_compare_probe.json`
+    - `graspgen`
+      - `/tmp/script_policy_compare_configs/place_empty_cup_graspgen_compare_probe.json`
+  - 当前 inspect 侧真实结果已经更新为：
+    - `graspnet_baseline`
+      - `selected_backend = graspnet_baseline`
+      - 已出现 `graspnet_baseline_guided_c0/c1/c2`
+      - `planner_status = Success`
+    - `graspgen`
+      - `selected_backend = graspgen`
+      - 已出现 `graspgen_guided_c0/c1/c2`
+      - `planner_status = Success`
+  - 因而 compare 线当前阶段结论应更新为：
+    - 在 `place_empty_cup` 的 inspect 面上
+    - `GraspNetBaseline / GraspGen` 已经从
+      - `candidate present but planner failed`
+      前推到
+      - `planner-feasible`
+      - 并进入真实 `selected_backend` 竞争面
+  - 仍需保留的后续动作：
+    - 把这一步从 inspect 面正式推进到 execution-level compare summary
+    - 然后再扩到 healthy5 `seed=1`
+
+- 当前最新阶段状态补充：
+  - 上述 `place_empty_cup seed=1` 的 inspect 结论现已正式推进到 execution-level compare summary：
+    - `place_empty_cup_graspnet_baseline_compare`
+      - `selected_backend = graspnet_baseline`
+      - `final_status = success`
+    - `place_empty_cup_graspgen_compare`
+      - `selected_backend = graspgen`
+      - `final_status = success`
+  - `robotwin_multitask_place_fm_backend_compare` suite summary 也已按当前已有 run summaries 重建：
+    - 当前聚合：
+      - `run_count = 7`
+      - `env_success_count = 7`
+      - `selected_backend_counts = {"contact_graspnet": 1, "depth_synthesized": 4, "graspgen": 1, "graspnet_baseline": 1}`
+  - 因此 compare 线的下一步默认顺序应更新为：
+    1. 保持这三条 backend 在 `place_empty_cup` 上的 execution compare 结果不回退
+    2. 把 `graspnet_baseline / graspgen` 扩到 healthy5 的其余任务 `seed=1`
+    3. 同时继续使用统一 compare summary，检查它们是否在更多任务上仍能保持
+       - `backend_candidate_planner_feasible`
+       - 或至少稳定落在更干净的 compare 状态
+
+- 当前最新阶段状态补充：
+  - FM compare 的统一报告面已进一步收口：
+    - `evaluate_robotwin_multitask_suite.py` 现在会在 run summary 和 markdown report 中稳定透出：
+      - `backend_compare_diagnostics`
+      - `inspect_backend_compare_diagnostics`
+    - 这套 compare 诊断当前固定区分四种状态：
+      - `backend_not_ready`
+      - `backend_runtime_ok_but_no_candidate`
+      - `backend_candidate_present_but_planner_failed`
+      - `backend_candidate_planner_feasible`
+    - 同时还会透出：
+      - `selection_outcome`
+      - `top_candidate`
+      - `top_candidate_runtime_reason`
+    - 因此 compare 线当前已经从“只知道最终 fallback 了什么”升级为：
+      - 能直接看出外部 backend 是没就绪
+      - 还是跑起来但没候选
+      - 还是候选存在但 planner 失败
+      - 还是已经 planner-feasible 但排序输给当前 selected backend
+  - 当前这轮验证：
+    - `conda run -n script_policy python -m pytest -q script_runtime/tests/test_fm_grasp_stack.py script_runtime/tests/test_robotwin_multitask_suite.py`
+    - 结果：
+      - `54 passed`
+  - 因而当前下一轮施工顺序继续固定为：
+    1. 守住 `place-only` gate 的 `17/18`
+    2. 继续收敛第一波 complex probe：
+       - `place_can_basket`
+       - `handover_block`
+       - `open_microwave`
+    3. 在 `place_empty_cup seed=1` 上继续把
+       - `graspgen`
+       - `graspnet_baseline`
+       从“candidate present but planner failed”推进到“至少一条 planner-feasible”
+    4. 只有在这一步成立后，再扩到 healthy5 `seed=1`
+
+- 当前最新阶段状态补充：
+  - `handover_block` targeted complex probe 已按新的终局归因规则重新 isolated 复跑：
+    - 当前最新真实结论已更新为：
+      - `failure_stage = lift_persistence`
+      - `probe_stage = ownership_transfer`
+      - `contract_gap_hint = receiver_grasp_persistence_or_ownership_transfer_gap`
+      - `initial_failure_skill = ExecuteGraspPhase`
+      - `failure_skill = CheckGrasp`
+      - `failure_node_name = check_receiver_grasp`
+    - 这意味着 handover 家族当前首要缺口已从旧的
+      - source grasp closure / candidate family
+      转成更贴近 trace 的
+      - receiver grasp persistence / ownership transfer
+  - `open_microwave` 也已再次 targeted isolated 复跑：
+    - 当前仍稳定为：
+      - `failure_stage = grasp_closure`
+      - `probe_stage = handle_acquisition`
+      - `contract_gap_hint = handle_grasp_closure_gap`
+    - articulated 家族当前仍继续主攻 handle grasp closure
+  - `GraspGen` compare 线本轮已真实接回执行链：
+    - 已补齐：
+      - `third_party/GraspGenModels`
+      - 依赖：
+        - `webdataset`
+        - `meshcat`
+        - `diffusers/timm`
+        - `spconv`
+        - `torch_scatter / torch_cluster / torch_geometric`
+        - `pointnet2_ops`
+    - `run_graspgen_headless.py` 已补 hub compatibility shim
+    - standalone smoke 已成功产出：
+      - `grasp_total = 60`
+    - `place_empty_cup_graspgen_compare` 当前真实状态应更新为：
+      - backend headless artifact 已产出
+      - trace candidate list 已出现 `proposal_backend = graspgen`
+      - 当前还未切到 `selected_backend = graspgen`
+      - 当前最靠前的真实 execution-level 阻塞是：
+        - backend candidate 已进入统一候选面
+        - 但当前 `planner_status = Failure`
+        - 因此 depth fallback 仍排在前面
+  - `GraspNetBaseline` compare 线本轮也已真实接回执行链：
+    - 已补齐：
+      - `checkpoint-rs.tar`
+      - `graspnetAPI`
+      - baseline `pointnet2` / `knn` 扩展
+    - standalone smoke 已成功产出：
+      - `grasp_total = 60`
+    - `place_empty_cup_graspnet_baseline_compare` 当前真实状态应更新为：
+      - backend headless artifact 已产出
+      - trace candidate list 已出现 `proposal_backend = graspnet_baseline`
+      - 当前同样尚未切到 `selected_backend = graspnet_baseline`
+      - 当前 execution-level 阻塞也已从 readiness 前移成：
+        - candidate 进入统一候选面
+        - 但当前 `planner_status = Failure`
+        - 因此仍由 depth fallback 主执行
+  - compare suite 配置已显式收口：
+    - `script_runtime/configs/robotwin_multitask_place_fm_backend_compare_suite.yaml`
+    - 现已固定写入：
+      - `graspnet_baseline.python_bin`
+      - `graspnet_baseline.checkpoint_path`
+      - `graspgen.python_bin`
+      - `graspgen.gripper_config`
+    - 这意味着 compare 线已从“当前 shell 下偶然可跑”提升为“配置层可复跑”
+  - 当前这轮验证：
+    - `conda run -n script_policy python -m pytest -q script_runtime/tests/test_robotwin_multitask_suite.py script_runtime/tests/test_fm_grasp_stack.py`
+    - 结果：
+      - `53 passed`
+
+- 当前最新阶段状态补充：
+  - `place_can_basket` targeted complex probe 已在最新 taxonomy 补丁后再次 isolated 复跑：
+    - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_complex_probe/`
+    - 当前这条 run 的真实汇总已经稳定成：
+      - `probe_stage = support_regrasp`
+      - `failure_stage = place_motion`
+      - `failure_skill = SupportLiftPull`
+      - `contract_gap_hint = basket_lift_or_support_completion_gap`
+    - 当前这一步的关键收口不是“偶然跑到更后面”，而是：
+      - staged-place summary 现在已经把
+        - support `Lift`
+        - support `SupportLiftPull`
+        两种近邻失败都统一收敛到：
+        - `basket_lift_or_support_completion_gap`
+    - 因此 `place_can_basket` 当前应统一解释成：
+      - 已稳定进入 `support_regrasp`
+      - 当前主缺口是 basket lift / support completion
+      - 不再接受空白 hint 或回退到笼统 post-place 解释
+  - `place_empty_cup` 的三后端 compare smoke 也已在最新补丁后重新 isolated 复跑：
+    - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare/`
+    - 当前真实 compare 结果是：
+      - `contact_graspnet`
+        - 继续保持 `fm_backend` 主执行成功
+      - `graspnet_baseline`
+        - runtime fallback:
+          - `checkpoint_missing`
+        - inspect fallback:
+          - `checkpoint_missing`
+      - `graspgen`
+        - runtime fallback:
+          - `models_repo_missing`
+        - inspect fallback:
+          - `models_repo_missing`
+    - 这意味着 compare 线的当前推进状态已更新为：
+      - `GraspGen` blocker 已从旧的 `gripper_config_missing` 前移到更前置的 `models_repo_missing`
+      - 当前下一步应优先补 models repo 就绪，而不是继续停在笼统 adapter/flag 层
+  - 当前这轮验证：
+    - `conda run -n script_policy python -m pytest -q script_runtime/tests/test_robotwin_multitask_suite.py script_runtime/tests/test_grasp_semantics.py script_runtime/tests/test_fm_grasp_stack.py`
+    - 结果：
+      - `62 passed`
+
+- 当前最新阶段状态补充：
+  - 已完成一轮新的“门禁 / complex probe / compare smoke”对齐复跑：
+    - `place-only` gate：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_baseline/`
+      - 当前结果仍是：
+        - `18 runs / 17 env success`
+      - 当前唯一失败仍固定为：
+        - `place_container_plate seed=2`
+        - `failure_stage = lift_persistence`
+    - `complex_probe`：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_complex_probe/`
+      - 当前三条 probe 的最新真实落点为：
+        - `place_can_basket`
+          - `probe_stage = support_regrasp`
+          - `failure_stage = place_motion`
+          - `contract_gap_hint = basket_lift_or_support_completion_gap`
+          - `failure_node_name = support_lift_pull`
+          - 当前主缺口已不再是“有没有第二阶段”
+          - 而是：
+            - basket support regrasp 已成功
+            - `SupportLiftPull` 的 motion completion 失败
+        - `handover_block`
+          - `failure_stage = grasp_closure`
+          - `probe_stage = source_acquisition`
+          - `contract_gap_hint = source_grasp_closure_or_candidate_family_gap`
+        - `open_microwave`
+          - `failure_stage = grasp_closure`
+          - `probe_stage = handle_acquisition`
+          - `contract_gap_hint = handle_grasp_closure_gap`
+      - 当前平台层 taxonomy 收口已完成：
+        - `place_can_basket` 在 `SupportLiftPull` 失败时，summary 已按：
+          - `failure_stage = place_motion`
+          - `contract_gap_hint = basket_lift_or_support_completion_gap`
+          稳定解释
+    - `place_empty_cup` compare smoke：
+      - `script_runtime/artifacts/robotwin_multitask/robotwin_multitask_place_fm_backend_compare/`
+      - 当前结果已更新为：
+        - `contact_graspnet`
+          - `selected_backend = contact_graspnet`
+          - `selected_backend_kind = fm_backend`
+          - `final_status = success`
+        - `graspnet_baseline`
+          - `fallback_reason = checkpoint_missing`
+        - `graspgen`
+          - `fallback_reason = gripper_config_missing`
+      - 因此 compare 当前主目标应明确为：
+        - 先解决 checkpoint / config readiness
+        - 再扩到 healthy5，而不是回到“是否已接线”的阶段
+
+- 当前最新阶段状态补充：
+  - `place_can_basket` 这条 staged-place probe 已从“post-place follow-up”正式推进到“support regrasp”：
+    - task tree 现在已包含：
+      - `PrepareSupportRegrasp`
+      - support perception
+      - support grasp retry
+      - `SupportLiftPull`
+    - summary 现在会把新阶段透出成：
+      - `probe_stage = support_regrasp`
+      - `support_regrasp_grasp_closure_gap`
+      - `basket_lift_or_support_completion_gap`
+    - 这意味着第一波 complex probe 主线里，`place_can_basket` 已不再只是 contract hint，而是开始具备真实第二阶段执行骨架
+  - `open_microwave` 当前已补 articulated handle 语义，不再沿普通 place grasp 规则默认排候选：
+    - bridge 当前对 `open_microwave` 固定采用：
+      - handle affordance
+      - preferred family `{0,1,2,4}`
+      - preferred contact `0`
+    - probe config 也已补 strict handle affordance overrides
+  - `GraspNetBaseline / GraspGen` compare 线当前已补上第一版真实 adapter：
+    - 新增 headless runner：
+      - `run_graspnet_baseline_headless.py`
+      - `run_graspgen_headless.py`
+    - `session.py` / `build_default_fm_first_grasp_stack(...)` 当前也已支持 backend-specific config：
+      - `graspnet_baseline.python_bin / checkpoint_path / max_candidates`
+      - `graspgen.python_bin / gripper_config / max_candidates`
+    - 当前阶段性结论应更新为：
+      - compare 主线已不再被 `integration_not_implemented` 完整卡住
+      - 至少 `GraspNetBaseline` 已能落到更具体 blocker：`checkpoint_missing`
+      - `GraspGen` 当前也已具备真实接线，只是仍需要本机模型配置到位才能进一步前移 blocker
+  - 当前这轮 contract 级验证：
+    - 定向 pytest 已通过：
+      - `84 passed`
 
 - 当前最新阶段状态补充：
   - 2026-04-21 晚些时候又完成了一轮“complex probe / compare 并行收口”：

@@ -7,7 +7,14 @@ from typing import Any, List
 from script_runtime.adapters import PerceptionObservation
 from script_runtime.core.failure_codes import FailureCode
 from script_runtime.core.result_types import RecoveryAction, SkillResult
-from script_runtime.core.skill_base import Skill, SkillContext
+from script_runtime.core.skill_base import (
+    Skill,
+    SkillContext,
+    begin_grasp_attempt,
+    in_support_regrasp_context,
+    support_regrasp_trace_context,
+    sync_active_arm_to_candidate,
+)
 from script_runtime.planning import (
     annotate_grasp_candidates,
     resolve_grasp_semantic_policy,
@@ -32,6 +39,16 @@ def _build_observation(context: SkillContext) -> PerceptionObservation:
         task_goal=dict(context.world_state.execution.task_goal),
         metadata=metadata,
     )
+
+
+def _designated_support_arm(context: SkillContext) -> str:
+    if not in_support_regrasp_context(context):
+        return ""
+    blackboard = getattr(context, "blackboard", None)
+    if blackboard is None or not hasattr(blackboard, "get"):
+        return ""
+    arm = str(blackboard.get("support_arm") or "").strip().lower()
+    return arm if arm in {"left", "right"} else ""
 
 
 class GetObjectPose(Skill):
@@ -135,6 +152,12 @@ class GetGraspCandidates(Skill):
         observation = _build_observation(context)
         candidate_provider = context.adapters.get("perception")
         fallback_provider = context.adapters.get("maniskill") or context.adapters.get("sdk")
+        support_arm = _designated_support_arm(context)
+        if support_arm:
+            sdk = context.adapters.get("sdk")
+            if sdk is not None and hasattr(sdk, "active_arm"):
+                setattr(sdk, "active_arm", support_arm)
+            context.blackboard.set("active_arm", support_arm)
         candidates = None
         candidate_source = "none"
         if candidate_provider is not None and hasattr(candidate_provider, "get_grasp_candidates"):
@@ -155,6 +178,20 @@ class GetGraspCandidates(Skill):
         if not candidates:
             return SkillResult.failure(FailureCode.NO_GRASP_CANDIDATE, message="No grasp candidates")
 
+        if support_arm:
+            support_candidates = [dict(candidate) for candidate in list(candidates or []) if str(candidate.get("arm") or "").strip().lower() == support_arm]
+            if not support_candidates:
+                available_arms = sorted(
+                    {str(candidate.get("arm") or "").strip().lower() for candidate in list(candidates or []) if str(candidate.get("arm") or "").strip()}
+                )
+                return SkillResult.failure(
+                    FailureCode.NO_GRASP_CANDIDATE,
+                    message=f"No grasp candidates for designated support arm: {support_arm}",
+                    support_arm=support_arm,
+                    available_candidate_arms=available_arms,
+                )
+            candidates = support_candidates
+
         learned = context.adapters.get("learned")
         if learned is not None:
             scores = learned.score(candidates, context.world_state, context)
@@ -170,10 +207,12 @@ class GetGraspCandidates(Skill):
         semantic_policy = resolve_grasp_semantic_policy(task_name, blackboard=context.blackboard)
         context.blackboard.update_world(learned={"grasp_candidates": candidates})
         context.blackboard.set("active_grasp_candidate", candidates[0])
+        sync_active_arm_to_candidate(context, candidates[0])
         if candidates[0].get("pose") is not None:
             context.blackboard.set("active_grasp_pose", candidates[0]["pose"])
         if candidates[0].get("pregrasp_pose") is not None:
             context.blackboard.set("pregrasp_pose", candidates[0]["pregrasp_pose"])
+        begin_grasp_attempt(context, candidates[0], source="GetGraspCandidates")
         context.blackboard.set("grasp_semantic_policy", semantic_policy)
         context.blackboard.set("visual_review_required", bool(semantic_policy.get("visual_review_required", False)))
         planner_diagnostics = []
@@ -209,6 +248,14 @@ class GetGraspCandidates(Skill):
 
     def recover(self, context: SkillContext):
         return RecoveryAction(name="ReacquirePerception")
+
+    def trace_payload(self, context: SkillContext, result: SkillResult):
+        payload = {
+            "message": result.message,
+            "payload": result.payload,
+        }
+        payload.update(support_regrasp_trace_context(context))
+        return payload
 
 
 class ReacquirePerception(Skill):

@@ -368,14 +368,51 @@ class RoboTwinBridge(SDKBridge):
         )
         candidates = self.get_grasp_candidates()
         active_candidate: Dict[str, Any] = {}
-        if candidates:
-            active_candidate = self._resolve_active_grasp_candidate(blackboard, candidates)
+        retained_previous_support_candidate = False
+        if self._should_retain_previous_support_candidate(
+            blackboard=blackboard,
+            refresh_reason=refresh_reason,
+            current_candidates=candidates,
+            previous_active=previous_active,
+        ):
+            retained_previous_support_candidate = True
+            candidates = [dict(previous_active)]
+            active_candidate = dict(previous_active)
             blackboard.update_world(learned={"grasp_candidates": candidates})
             blackboard.set("grasp_candidates", candidates)
             blackboard.set("active_grasp_candidate", active_candidate)
             blackboard.set("active_grasp_pose", active_candidate["pose"])
             if active_candidate.get("pregrasp_pose") is not None:
                 blackboard.set("pregrasp_pose", active_candidate["pregrasp_pose"])
+        elif candidates:
+            attempt_candidate = dict(blackboard.get("grasp_attempt_candidate") or {})
+            active_candidate = self._resolve_active_grasp_candidate(blackboard, candidates, attempt_candidate=attempt_candidate)
+            blackboard.update_world(learned={"grasp_candidates": candidates})
+            blackboard.set("grasp_candidates", candidates)
+            blackboard.set("active_grasp_candidate", active_candidate)
+            blackboard.set("active_grasp_pose", active_candidate["pose"])
+            if active_candidate.get("pregrasp_pose") is not None:
+                blackboard.set("pregrasp_pose", active_candidate["pregrasp_pose"])
+        if bool(blackboard.get("probe_support_regrasp_active", False)):
+            support_arm = self._active_arm()
+            blackboard.set("support_arm", support_arm)
+            blackboard.set("support_target_frame", f"robotwin::{self.target_attr}")
+            candidate_label = str(active_candidate.get("variant_label") or active_candidate.get("label") or "").strip()
+            if active_candidate:
+                if active_candidate.get("pregrasp_pose") is not None:
+                    if retained_previous_support_candidate and candidate_label:
+                        blackboard.set(
+                            "support_pregrasp_pose_source",
+                            f"retained_previous_active_candidate:{candidate_label}",
+                        )
+                    elif candidate_label:
+                        blackboard.set("support_pregrasp_pose_source", f"active_grasp_candidate:{candidate_label}")
+                    else:
+                        blackboard.set("support_pregrasp_pose_source", "active_grasp_candidate")
+                else:
+                    blackboard.set("support_pregrasp_pose_source", "active_grasp_candidate:missing_pregrasp_pose")
+            else:
+                blackboard.set("support_pregrasp_pose_source", "world_refresh:no_candidate")
         diagnostic = self._build_grasp_candidate_refresh_diagnostic(
             previous_candidates=previous_candidates,
             current_candidates=candidates or [],
@@ -404,13 +441,49 @@ class RoboTwinBridge(SDKBridge):
         self.last_status = status
         return status
 
-    def _resolve_active_grasp_candidate(self, blackboard: Any, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _should_retain_previous_support_candidate(
+        self,
+        *,
+        blackboard: Any,
+        refresh_reason: str,
+        current_candidates: List[Dict[str, Any]],
+        previous_active: Dict[str, Any],
+    ) -> bool:
+        if not bool(blackboard.get("probe_support_regrasp_active", False)):
+            return False
+        if str(refresh_reason or "") not in {"post_PrepareGripperForGrasp", "post_GoPregrasp"}:
+            return False
+        if current_candidates:
+            return False
+        if not previous_active:
+            return False
+        return previous_active.get("pose") is not None and previous_active.get("pregrasp_pose") is not None
+
+    def _resolve_active_grasp_candidate(
+        self,
+        blackboard: Any,
+        candidates: List[Dict[str, Any]],
+        *,
+        attempt_candidate: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        attempt = dict(attempt_candidate or {})
+        if attempt:
+            for candidate in candidates:
+                if self._same_grasp_candidate(candidate, attempt):
+                    return candidate
         current = blackboard.get("active_grasp_candidate")
         if not current:
             return candidates[0]
         for candidate in candidates:
             if self._same_grasp_candidate(candidate, current):
-                return candidate
+                matched = candidate
+                matched_status = str(matched.get("planner_status") or "Unknown")
+                if matched_status == "Success":
+                    return matched
+                for promoted in candidates:
+                    if str(promoted.get("planner_status") or "Unknown") == "Success":
+                        return promoted
+                return matched
         return candidates[0]
 
     @staticmethod
@@ -542,6 +615,33 @@ class RoboTwinBridge(SDKBridge):
             "degraded_candidates": degraded_candidates,
             "previous_candidates": previous_summary[:8],
             "current_candidates": current_summary[:8],
+            "grasp_attempt_candidate": None
+            if self.blackboard is None
+            else self.blackboard.get("grasp_attempt_candidate"),
+            "grasp_attempt_initial_candidate": None
+            if self.blackboard is None
+            else self.blackboard.get("grasp_attempt_initial_candidate"),
+            "grasp_attempt_candidate_identity": ""
+            if self.blackboard is None
+            else str(self.blackboard.get("grasp_attempt_candidate_identity", "") or ""),
+            "grasp_attempt_candidate_source": ""
+            if self.blackboard is None
+            else str(self.blackboard.get("grasp_attempt_candidate_source", "") or ""),
+            "grasp_attempt_reselected": False
+            if self.blackboard is None
+            else bool(self.blackboard.get("grasp_attempt_reselected", False)),
+            "grasp_attempt_reselection_node": ""
+            if self.blackboard is None
+            else str(self.blackboard.get("grasp_attempt_reselection_node", "") or ""),
+            "grasp_attempt_reselection_skill": ""
+            if self.blackboard is None
+            else str(self.blackboard.get("grasp_attempt_reselection_skill", "") or ""),
+            "grasp_attempt_forced_perception_rebuild": False
+            if self.blackboard is None
+            else bool(self.blackboard.get("grasp_attempt_forced_perception_rebuild", False)),
+            "grasp_attempt_forced_perception_rebuild_reason": ""
+            if self.blackboard is None
+            else str(self.blackboard.get("grasp_attempt_forced_perception_rebuild_reason", "") or ""),
         }
 
     def get_snapshot(self) -> CameraSnapshot:
@@ -659,11 +759,29 @@ class RoboTwinBridge(SDKBridge):
             "is_grasped": bool(grasp_diagnostics.get("is_grasped", False)),
             "grasp_diagnostics": grasp_diagnostics,
         }
+        if self.blackboard is not None:
+            support_context = {
+                "support_arm": str(self.blackboard.get("support_arm", "") or ""),
+                "support_target_frame": str(self.blackboard.get("support_target_frame", "") or ""),
+                "support_pregrasp_pose_source": str(self.blackboard.get("support_pregrasp_pose_source", "") or ""),
+                "support_regrasp_substage": str(self.blackboard.get("support_regrasp_substage", "") or ""),
+            }
+            snapshot.update({key: value for key, value in support_context.items() if value})
         if object_pose is not None and target_center_pose is not None:
             dx = float(object_pose[0] - target_center_pose[0])
             dy = float(object_pose[1] - target_center_pose[1])
             dz = float(object_pose[2] - target_center_pose[2])
             snapshot["object_to_target_center_delta"] = {
+                "dx": dx,
+                "dy": dy,
+                "dz": dz,
+                "xy_norm": float(np.sqrt(dx * dx + dy * dy)),
+            }
+        if object_pose is not None and support_pose is not None:
+            dx = float(object_pose[0] - support_pose[0])
+            dy = float(object_pose[1] - support_pose[1])
+            dz = float(object_pose[2] - support_pose[2])
+            snapshot["object_to_support_pose_delta"] = {
                 "dx": dx,
                 "dy": dy,
                 "dz": dz,
@@ -1264,6 +1382,8 @@ class RoboTwinBridge(SDKBridge):
         return annotated
 
     def _default_affordance_type_for_object(self) -> str:
+        if self.task_name == "open_microwave":
+            return "handle"
         model_name = self._object_model_name()
         if model_name in {"021_cup", "002_bowl"}:
             return "rim_grasp"
@@ -1471,6 +1591,8 @@ class RoboTwinBridge(SDKBridge):
     def _preferred_contact_point(self, arm: str) -> int:
         if self.task_name == "handover_block":
             return 0 if arm == "left" else 4
+        if self.task_name == "open_microwave":
+            return 0
         return 2 if arm == "left" else 0
 
     def _task_specific_contact_family(self, arm: str, available_contact_ids: List[int]) -> set[int]:
@@ -1479,6 +1601,8 @@ class RoboTwinBridge(SDKBridge):
             source_family = {0, 1, 2, 3}
             receiver_family = {4, 5, 6, 7}
             return (source_family if arm == "left" else receiver_family) & available
+        if self.task_name == "open_microwave":
+            return {0, 1, 2, 4} & available
         return set()
 
     def _target_functional_pose(self) -> Any | None:

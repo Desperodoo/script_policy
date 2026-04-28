@@ -6,7 +6,16 @@ from typing import Any, Dict, List, Optional
 
 from script_runtime.core.failure_codes import FailureCode
 from script_runtime.core.result_types import SkillResult
-from script_runtime.core.skill_base import Skill, SkillContext, request_world_refresh
+from script_runtime.core.skill_base import (
+    Skill,
+    SkillContext,
+    ensure_grasp_attempt_candidate,
+    request_world_refresh,
+    reselect_grasp_attempt_candidate,
+    set_support_regrasp_substage,
+    support_regrasp_trace_context,
+    sync_active_arm_to_candidate,
+)
 from script_runtime.planning import build_grasp_semantic_report, resolve_runtime_task_name
 
 
@@ -17,6 +26,137 @@ def _trace_snapshot(sdk, label: str):
         except Exception as exc:
             return {"label": label, "snapshot_error": repr(exc)}
     return {"label": label}
+
+
+def _pose_xyz(snapshot: Dict[str, Any], key: str) -> List[float]:
+    values = [float(v) for v in list(snapshot.get(key) or [])[:3]]
+    if len(values) != 3:
+        return []
+    return values
+
+
+def _delta_summary(snapshot: Dict[str, Any], key: str) -> Dict[str, float]:
+    row = dict(snapshot.get(key) or {})
+    if not row:
+        return {}
+    summary: Dict[str, float] = {}
+    for name in ("dx", "dy", "dz", "xy_norm"):
+        value = row.get(name)
+        if value is None:
+            continue
+        summary[name] = float(value)
+    return summary
+
+
+def _xyz_equal(a: List[float], b: List[float], *, tol: float = 1e-5) -> bool:
+    return bool(a) and bool(b) and len(a) == len(b) and all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b))
+
+
+def _support_completion_diagnostics(
+    *,
+    before_snapshot: Dict[str, Any],
+    after_snapshot: Dict[str, Any],
+    env_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    before_support_delta = _delta_summary(before_snapshot, "object_to_support_pose_delta")
+    after_support_delta = _delta_summary(after_snapshot, "object_to_support_pose_delta")
+    before_target_delta = _delta_summary(before_snapshot, "object_to_target_center_delta")
+    after_target_delta = _delta_summary(after_snapshot, "object_to_target_center_delta")
+
+    reference_frame = ""
+    reference_delta: Dict[str, float] = {}
+    if after_support_delta:
+        reference_frame = "support_pose"
+        reference_delta = after_support_delta
+    elif after_target_delta:
+        reference_frame = "target_center"
+        reference_delta = after_target_delta
+
+    geometry_converged = False
+    if reference_delta:
+        geometry_converged = (
+            float(reference_delta.get("xy_norm", 1e9)) <= 0.08
+            and abs(float(reference_delta.get("dz", 1e9))) <= 0.08
+        )
+
+    before_object_xyz = _pose_xyz(before_snapshot, "object_pose")
+    after_object_xyz = _pose_xyz(after_snapshot, "object_pose")
+    before_support_xyz = _pose_xyz(before_snapshot, "support_pose")
+    after_support_xyz = _pose_xyz(after_snapshot, "support_pose")
+    object_pose_stale = _xyz_equal(before_object_xyz, after_object_xyz)
+    support_pose_stale = _xyz_equal(before_support_xyz, after_support_xyz)
+    snapshot_missing = not reference_delta and (not after_object_xyz or not after_support_xyz)
+    state_update_gap = snapshot_missing or (object_pose_stale and support_pose_stale)
+    success = bool(env_result.get("success", False))
+
+    if success:
+        subtype = ""
+        reason = ""
+    elif geometry_converged:
+        subtype = "support_success_conditions_unmet"
+        reason = "support geometry converged but environment success inputs still failed"
+    elif state_update_gap:
+        subtype = "support_state_update_gap"
+        reason = "support motion reported success but support-side state snapshot did not update consistently"
+    else:
+        subtype = "support_target_alignment_gap"
+        reason = "support lift or pull completed but final object-to-support geometry still missed the task contract"
+
+    return {
+        "support_completion_subtype": subtype,
+        "support_completion_gap_reason": reason,
+        "support_completion_reference_frame": reference_frame,
+        "support_completion_geometry_converged": geometry_converged,
+        "before_object_to_support_pose_delta": before_support_delta,
+        "after_object_to_support_pose_delta": after_support_delta,
+        "before_object_to_target_center_delta": before_target_delta,
+        "after_object_to_target_center_delta": after_target_delta,
+        "before_object_pose_xyz": before_object_xyz,
+        "after_object_pose_xyz": after_object_xyz,
+        "before_support_pose_xyz": before_support_xyz,
+        "after_support_pose_xyz": after_support_xyz,
+        "support_object_pose_stale": object_pose_stale,
+        "support_pose_stale": support_pose_stale,
+        "support_state_update_gap": state_update_gap,
+        "env_result": dict(env_result or {}),
+    }
+
+
+def _support_motion_completion_diagnostics(
+    *,
+    before_snapshot: Dict[str, Any],
+    after_snapshot: Dict[str, Any],
+    attempted_motion_plans: List[Dict[str, Any]],
+    requested_delta_xyz: List[float],
+) -> Dict[str, Any]:
+    diagnostics = _support_completion_diagnostics(
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+        env_result={},
+    )
+    attempts = [dict(row or {}) for row in list(attempted_motion_plans or [])]
+    all_failed_at_first_step = bool(attempts) and all(
+        not bool(row.get("ok", False)) and int(row.get("failed_step_index", -1)) == 0 for row in attempts
+    )
+    attempted_plan_names = [str(row.get("plan_name") or "") for row in attempts if str(row.get("plan_name") or "")]
+    first_step = dict(((attempts[0].get("steps") or [None])[0]) or {}) if attempts else {}
+    diagnostics.update(
+        {
+            "support_completion_subtype": "support_follow_up_motion_unreachable",
+            "support_completion_gap_reason": (
+                "support lift succeeded but every follow-up motion plan failed on its first step"
+                if all_failed_at_first_step
+                else "support completion follow-up motion failed before task-success verification"
+            ),
+            "support_completion_reference_frame": str(diagnostics.get("support_completion_reference_frame") or "support_pose"),
+            "support_motion_plan_names": attempted_plan_names,
+            "support_motion_all_failed_at_first_step": all_failed_at_first_step,
+            "support_motion_requested_delta_xyz": [float(value) for value in list(requested_delta_xyz or [])[:3]],
+            "support_motion_start_pose": [float(value) for value in list(first_step.get("start_pose") or [])[:7]],
+            "support_motion_failed_target_pose": [float(value) for value in list(first_step.get("target_pose") or [])[:7]],
+        }
+    )
+    return diagnostics
 
 
 def _candidate_identity(candidate: Dict[str, Any]) -> tuple:
@@ -67,6 +207,7 @@ class ReselectGraspAfterPregrasp(Skill):
                 grasp_candidate_refresh=refresh,
             )
 
+        ensure_grasp_attempt_candidate(context, active, source="ReselectGraspAfterPregrasp")
         selected, reselection_reason = self._select_candidate(candidates=candidates, active=active, refresh=refresh, context=context)
         if selected is None:
             return SkillResult.success(
@@ -81,10 +222,17 @@ class ReselectGraspAfterPregrasp(Skill):
         context.blackboard.update_world(learned={"grasp_candidates": reordered})
         context.blackboard.set("grasp_candidates", reordered)
         context.blackboard.set("active_grasp_candidate", selected)
+        sync_active_arm_to_candidate(context, selected)
         if selected.get("pose") is not None:
             context.blackboard.set("active_grasp_pose", selected["pose"])
         if selected.get("pregrasp_pose") is not None:
             context.blackboard.set("pregrasp_pose", selected["pregrasp_pose"])
+        reselect_grasp_attempt_candidate(
+            context,
+            selected,
+            source="ReselectGraspAfterPregrasp",
+            reason=reselection_reason,
+        )
 
         return SkillResult.success(
             reselected=True,
@@ -220,6 +368,268 @@ class SwitchActiveArm(Skill):
         return SkillResult.success(previous_active_arm=current, active_arm=target)
 
 
+class PrepareSupportRegrasp(Skill):
+    def __init__(self):
+        super().__init__(name="PrepareSupportRegrasp", timeout_s=2.0, failure_code=FailureCode.SDK_ERROR)
+
+    def run(self, context: SkillContext) -> SkillResult:
+        sdk = context.adapters.get("sdk")
+        if sdk is None:
+            return SkillResult.failure(FailureCode.SDK_ERROR, message="SDK adapter unavailable for support regrasp setup")
+
+        current = str(
+            context.blackboard.get("active_arm")
+            or getattr(sdk, "active_arm", "")
+            or dict(getattr(sdk, "get_status", lambda: {})() or {}).get("active_arm", "")
+            or "right"
+        ).strip().lower()
+        if current not in {"left", "right"}:
+            current = "right"
+        target = "left" if current == "right" else "right"
+
+        source_retract = {"ok": False, "skipped": True}
+        if hasattr(sdk, "move_j"):
+            try:
+                source_retract = dict(sdk.move_j([], speed=0.5) or {})
+            except Exception as exc:
+                source_retract = {"ok": False, "message": repr(exc)}
+
+        support_attr = str(
+            context.blackboard.get("probe_support_object_attr")
+            or getattr(sdk, "target_attr", "")
+            or "basket"
+        ).strip() or "basket"
+        support_target_attr = str(
+            context.blackboard.get("probe_support_target_attr")
+            or getattr(sdk, "target_attr", "")
+            or support_attr
+        ).strip() or support_attr
+        support_target_object = str(
+            context.blackboard.get("probe_support_target_object")
+            or support_attr
+        ).strip() or support_attr
+        support_pregrasp_distance = float(
+            context.blackboard.get("probe_support_pregrasp_distance", 0.08) or 0.08
+        )
+        support_delta_x = -0.02 if target == "left" else 0.02
+
+        setattr(sdk, "active_arm", target)
+        setattr(sdk, "object_attr", support_attr)
+        setattr(sdk, "target_attr", support_target_attr)
+        setattr(sdk, "pregrasp_distance", support_pregrasp_distance)
+
+        context.blackboard.set("active_arm", target)
+        context.blackboard.set("support_arm", target)
+        context.blackboard.set("support_target_frame", f"robotwin::{support_target_attr}")
+        context.blackboard.set("support_pregrasp_pose_source", "pending_world_refresh")
+        context.blackboard.set("required_grasp_affordances", ["body_support"])
+        context.blackboard.set("visual_review_required", True)
+        context.blackboard.set("servo_delta", [support_delta_x, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0])
+        context.blackboard.set("probe_phase", "support_regrasp")
+        context.blackboard.set("probe_support_regrasp_active", True)
+        context.blackboard.set("skip_release_sequence", False)
+        set_support_regrasp_substage(context, "support_pregrasp_generation")
+        for key in (
+            "object_pose",
+            "grasp_candidates",
+            "active_grasp_candidate",
+            "active_grasp_pose",
+            "pregrasp_pose",
+            "place_pose",
+            "place_release_pose",
+            "retreat_pose",
+            "support_pose",
+        ):
+            if hasattr(context.blackboard, "delete"):
+                context.blackboard.delete(key)
+
+        task_goal = dict(context.world_state.execution.task_goal or {})
+        task_goal.update(
+            {
+                "target_object": support_target_object,
+                "target_surface": support_target_attr,
+                "probe_phase": "support_regrasp",
+            }
+        )
+        context.blackboard.update_world(
+            execution={
+                "active_source": "robotwin",
+                "task_goal": task_goal,
+            }
+        )
+        request_world_refresh(context, sdk, reason="post_PrepareSupportRegrasp")
+        return SkillResult.success(
+            previous_active_arm=current,
+            active_arm=target,
+            support_arm=target,
+            support_object_attr=support_attr,
+            support_target_attr=support_target_attr,
+            support_target_frame=f"robotwin::{support_target_attr}",
+            support_pregrasp_distance=support_pregrasp_distance,
+            support_pregrasp_pose_source="pending_world_refresh",
+            support_regrasp_substage=context.blackboard.get("support_regrasp_substage"),
+            support_pull_delta=context.blackboard.get("servo_delta"),
+            source_retract=source_retract,
+        )
+
+    def trace_payload(self, context: SkillContext, result: SkillResult):
+        payload = {
+            "message": result.message,
+            "payload": result.payload,
+        }
+        payload.update(support_regrasp_trace_context(context))
+        return payload
+
+
+class SupportLiftPull(Skill):
+    def __init__(self):
+        super().__init__(name="SupportLiftPull", timeout_s=4.0, failure_code=FailureCode.NO_IK)
+
+    @staticmethod
+    def _plan_segments(delta: List[float]) -> List[Dict[str, Any]]:
+        dx = float(delta[0]) if len(delta) > 0 else 0.0
+        dy = float(delta[1]) if len(delta) > 1 else 0.0
+        dz = float(delta[2]) if len(delta) > 2 else 0.0
+
+        def _segment(x: float, y: float, z: float) -> List[float]:
+            return [float(x), float(y), float(z)]
+
+        plans = [
+            {"plan_name": "combined_full", "segments": [_segment(dx, dy, dz)]},
+            {"plan_name": "lift_only", "segments": [_segment(0.0, 0.0, dz)]},
+            {
+                "plan_name": "lift_then_pull",
+                "segments": [_segment(0.0, 0.0, dz), _segment(dx, dy, 0.0)],
+            },
+            {
+                "plan_name": "lift_then_half_pull",
+                "segments": [_segment(0.0, 0.0, dz), _segment(dx * 0.5, dy * 0.5, 0.0)],
+            },
+            {
+                "plan_name": "partial_combined",
+                "segments": [_segment(dx * 0.5, dy * 0.5, dz * 0.6)],
+            },
+        ]
+
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for plan in plans:
+            segments = [
+                [float(value) for value in segment]
+                for segment in list(plan.get("segments") or [])
+                if any(abs(float(value)) > 1e-6 for value in list(segment or [])[:3])
+            ]
+            if not segments:
+                continue
+            key = tuple(tuple(round(float(value), 6) for value in segment[:3]) for segment in segments)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"plan_name": str(plan.get("plan_name") or "support_motion"), "segments": segments})
+        return deduped
+
+    def _run_plan(self, sdk: Any, *, plan_name: str, segments: List[List[float]], speed: float) -> Dict[str, Any]:
+        steps: List[Dict[str, Any]] = []
+        for index, segment in enumerate(list(segments or [])):
+            status = dict(getattr(sdk, "get_status", lambda: {})() or {})
+            current_pose = list(status.get("eef_pose") or [])
+            if len(current_pose) < 7:
+                return {
+                    "ok": False,
+                    "plan_name": plan_name,
+                    "failed_step_index": index,
+                    "message": "Current ee pose unavailable for support lift",
+                    "steps": steps,
+                }
+
+            target_pose = list(current_pose)
+            for axis, value in enumerate(list(segment)[:3]):
+                target_pose[axis] += float(value)
+            result = dict(sdk.move_l(target_pose, speed=speed) or {})
+            step = {
+                "step_index": index,
+                "delta_xyz": [float(value) for value in list(segment)[:3]],
+                "start_pose": [float(value) for value in current_pose[:7]],
+                "target_pose": [float(value) for value in target_pose[:7]],
+                "sdk_result": result,
+            }
+            steps.append(step)
+            if not result.get("ok", False):
+                return {
+                    "ok": False,
+                    "plan_name": plan_name,
+                    "failed_step_index": index,
+                    "sdk_result": result,
+                    "steps": steps,
+                }
+
+        return {"ok": True, "plan_name": plan_name, "steps": steps}
+
+    def run(self, context: SkillContext) -> SkillResult:
+        sdk = context.adapters.get("sdk")
+        if sdk is None:
+            return SkillResult.failure(FailureCode.SDK_ERROR, message="SDK adapter unavailable for support lift")
+
+        set_support_regrasp_substage(context, "support_lift_completion")
+        delta = list(context.blackboard.get("servo_delta") or [])
+        if len(delta) < 3:
+            return SkillResult.failure(FailureCode.NO_IK, message="Missing support lift delta")
+        before_snapshot = _trace_snapshot(sdk, "support_lift_pull_before")
+        status = dict(getattr(sdk, "get_status", lambda: {})() or {})
+        current_pose = list(status.get("eef_pose") or [])
+        if len(current_pose) < 7:
+            return SkillResult.failure(FailureCode.NO_IK, message="Current ee pose unavailable for support lift")
+
+        motion_plans = self._plan_segments(delta)
+        attempts: List[Dict[str, Any]] = []
+        chosen_attempt: Dict[str, Any] | None = None
+        for plan in motion_plans:
+            attempt = self._run_plan(
+                sdk,
+                plan_name=str(plan.get("plan_name") or "support_motion"),
+                segments=list(plan.get("segments") or []),
+                speed=0.25,
+            )
+            attempts.append(attempt)
+            if attempt.get("ok", False):
+                chosen_attempt = attempt
+                break
+
+        if chosen_attempt is None:
+            after_failure_snapshot = _trace_snapshot(sdk, "support_lift_pull_after_failure")
+            return SkillResult.failure(
+                FailureCode.SDK_ERROR,
+                message="support lift pull failed",
+                sdk_result=attempts[-1].get("sdk_result") if attempts else {"ok": False},
+                attempted_motion_plans=attempts,
+                requested_delta_xyz=[float(value) for value in delta[:3]],
+                support_completion_diagnostics=_support_motion_completion_diagnostics(
+                    before_snapshot=before_snapshot,
+                    after_snapshot=after_failure_snapshot,
+                    attempted_motion_plans=attempts,
+                    requested_delta_xyz=list(delta[:3]),
+                ),
+            )
+        request_world_refresh(context, sdk, reason="post_SupportLiftPull")
+        return SkillResult.success(
+            motion_plan=str(chosen_attempt.get("plan_name") or ""),
+            motion_plan_attempts=attempts,
+            command=dict((chosen_attempt.get("steps") or [{}])[-1].get("sdk_result") or {}).get("command"),
+            target_pose=list((chosen_attempt.get("steps") or [{}])[-1].get("target_pose") or []),
+            requested_delta_xyz=[float(value) for value in delta[:3]],
+            support_regrasp_substage=context.blackboard.get("support_regrasp_substage"),
+            grasp_candidate_refresh=context.blackboard.get("last_grasp_candidate_refresh"),
+        )
+
+    def trace_payload(self, context: SkillContext, result: SkillResult):
+        payload = {
+            "message": result.message,
+            "payload": result.payload,
+        }
+        payload.update(support_regrasp_trace_context(context))
+        return payload
+
+
 class CheckSceneReady(Skill):
     def __init__(self):
         super().__init__(name="CheckSceneReady", timeout_s=0.2, failure_code=FailureCode.PERCEPTION_LOST)
@@ -250,6 +660,12 @@ class CheckGrasp(Skill):
         super().__init__(name="CheckGrasp", timeout_s=0.5, failure_code=FailureCode.GRASP_FAIL)
 
     def run(self, context: SkillContext) -> SkillResult:
+        node_name = str(context.metadata.get("current_node_name") or "").strip().lower()
+        if node_name.startswith("support_"):
+            if "after_lift" in node_name:
+                set_support_regrasp_substage(context, "support_lift_completion")
+            else:
+                set_support_regrasp_substage(context, "support_grasp_closure")
         grasp_adapter = context.adapters.get("maniskill") or context.adapters.get("sdk")
         grasped = bool(context.world_state.scene.grasped)
         if grasp_adapter is not None and hasattr(grasp_adapter, "is_grasped"):
@@ -284,6 +700,14 @@ class CheckGrasp(Skill):
             grasp_semantic_report=semantic_report,
         )
 
+    def trace_payload(self, context: SkillContext, result: SkillResult):
+        payload = {
+            "message": result.message,
+            "payload": result.payload,
+        }
+        payload.update(support_regrasp_trace_context(context))
+        return payload
+
 
 class CheckContact(Skill):
     def __init__(self):
@@ -317,6 +741,13 @@ class CheckTaskSuccess(Skill):
             )
 
         result = sdk.evaluate_task_success()
+        support_completion = {}
+        if context.blackboard is not None and bool(context.blackboard.get("probe_support_regrasp_active", False)):
+            support_completion = _support_completion_diagnostics(
+                before_snapshot=before_settle,
+                after_snapshot=after_settle,
+                env_result=dict(result or {}),
+            )
         if not result.get("ok", False):
             return SkillResult.failure(
                 FailureCode.SDK_ERROR,
@@ -324,6 +755,7 @@ class CheckTaskSuccess(Skill):
                 sdk_result=result,
                 before_settle_snapshot=before_settle,
                 after_settle_snapshot=after_settle,
+                support_completion_diagnostics=support_completion,
             )
         if not result.get("success", False):
             return SkillResult.failure(
@@ -332,10 +764,20 @@ class CheckTaskSuccess(Skill):
                 env_result=result,
                 before_settle_snapshot=before_settle,
                 after_settle_snapshot=after_settle,
+                support_completion_diagnostics=support_completion,
             )
         return SkillResult.success(
             env_success=True,
             env_result=result,
             before_settle_snapshot=before_settle,
             after_settle_snapshot=after_settle,
+            support_completion_diagnostics=support_completion,
         )
+
+    def trace_payload(self, context: SkillContext, result: SkillResult):
+        payload = {
+            "message": result.message,
+            "payload": result.payload,
+        }
+        payload.update(support_regrasp_trace_context(context))
+        return payload
